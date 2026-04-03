@@ -1462,6 +1462,27 @@ export class TappdSDK {
   }
 
   /**
+   * Trigger a specific in-app message by ID (e.g. from push payload).
+   * Uses the existing getInAppMessages + displayInAppMessage pipeline so
+   * triggers, expiration, and tracking behavior stay consistent.
+   */
+  async triggerInAppMessageById(messageId: string, forceRefresh = true): Promise<void> {
+    try {
+      const messages = await this.getInAppMessages(forceRefresh);
+      const target = messages.find(
+        (msg: any) => msg && (msg._id === messageId || msg.id === messageId),
+      );
+      if (!target) {
+        this.log('[Tappd SDK] triggerInAppMessageById: no message found for id:', messageId);
+        return;
+      }
+      await this.displayInAppMessage(target);
+    } catch (error) {
+      this.log('[Tappd SDK] triggerInAppMessageById error:', error);
+    }
+  }
+
+  /**
    * Display all pending messages
    */
   async displayPendingMessages(forceRefresh = false): Promise<void> {

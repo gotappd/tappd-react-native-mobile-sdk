@@ -28,19 +28,34 @@ export interface BlockRendererProps {
   rowPinContext?: 'default' | 'inPinnedStack';
 }
 
+/** API / dashboard may send spacing as numbers or strings ("16", "16px"). */
+function spacingPx(v: unknown): number | undefined {
+  if (v === null || v === undefined || v === '') return undefined;
+  if (typeof v === 'number' && !Number.isNaN(v)) return v;
+  if (typeof v === 'string') {
+    const n = parseFloat(v.replace(/px/gi, '').trim());
+    return Number.isNaN(n) ? undefined : n;
+  }
+  return undefined;
+}
+
 function spacingStyle(s?: SpacingConfig): object {
   if (!s) return {};
-  const o: Record<string, number | undefined> = {};
-  if (s.padding !== undefined) o.padding = s.padding;
-  if (s.paddingTop !== undefined) o.paddingTop = s.paddingTop;
-  if (s.paddingRight !== undefined) o.paddingRight = s.paddingRight;
-  if (s.paddingBottom !== undefined) o.paddingBottom = s.paddingBottom;
-  if (s.paddingLeft !== undefined) o.paddingLeft = s.paddingLeft;
-  if (s.margin !== undefined) o.margin = s.margin;
-  if (s.marginTop !== undefined) o.marginTop = s.marginTop;
-  if (s.marginRight !== undefined) o.marginRight = s.marginRight;
-  if (s.marginBottom !== undefined) o.marginBottom = s.marginBottom;
-  if (s.marginLeft !== undefined) o.marginLeft = s.marginLeft;
+  const o: Record<string, number> = {};
+  const put = (key: keyof SpacingConfig, out: string) => {
+    const n = spacingPx(s[key]);
+    if (n !== undefined) o[out] = n;
+  };
+  put('padding', 'padding');
+  put('paddingTop', 'paddingTop');
+  put('paddingRight', 'paddingRight');
+  put('paddingBottom', 'paddingBottom');
+  put('paddingLeft', 'paddingLeft');
+  put('margin', 'margin');
+  put('marginTop', 'marginTop');
+  put('marginRight', 'marginRight');
+  put('marginBottom', 'marginBottom');
+  put('marginLeft', 'marginLeft');
   return o;
 }
 
@@ -276,13 +291,13 @@ function RowBlock({ block, onButtonClick, onFormSubmit, rowPinContext = 'default
   const row = block.config.row;
   if (!row || !row.cells?.length) return null;
 
-  const gap = row.gap ?? 8;
-  const mar = row.margin ?? 0;
+  const gap = spacingPx(row.gap) ?? 8;
+  const mar = spacingPx(row.margin) ?? 0;
   const inStack = rowPinContext === 'inPinnedStack';
-  const marginTop = inStack ? 0 : row.marginTop ?? mar;
-  const marginRight = inStack ? 0 : row.marginRight ?? mar;
-  const marginBottom = inStack ? 0 : row.marginBottom ?? mar;
-  const marginLeft = inStack ? 0 : row.marginLeft ?? mar;
+  const marginTop = inStack ? 0 : spacingPx(row.marginTop) ?? mar;
+  const marginRight = inStack ? 0 : spacingPx(row.marginRight) ?? mar;
+  const marginBottom = inStack ? 0 : spacingPx(row.marginBottom) ?? mar;
+  const marginLeft = inStack ? 0 : spacingPx(row.marginLeft) ?? mar;
 
   const rowStyle: any = {
     flexDirection: 'row' as const,
@@ -290,18 +305,21 @@ function RowBlock({ block, onButtonClick, onFormSubmit, rowPinContext = 'default
     width: '100%' as const,
     gap,
     backgroundColor: row.backgroundColor,
-    borderWidth: row.borderWidth && row.borderStyle !== 'none' ? row.borderWidth : 0,
+    borderWidth: (() => {
+      const bw = spacingPx(row.borderWidth);
+      return bw && row.borderStyle !== 'none' ? bw : 0;
+    })(),
     borderColor: row.borderColor || '#ccc',
     borderStyle:
       row.borderStyle === 'dashed' ? 'dashed' : row.borderStyle === 'dotted' ? 'dotted' : 'solid',
-    borderRadius: row.borderRadius,
+    borderRadius: spacingPx(row.borderRadius),
     ...spacingStyle({
       padding: row.padding,
       paddingTop: row.paddingTop,
       paddingRight: row.paddingRight,
       paddingBottom: row.paddingBottom,
       paddingLeft: row.paddingLeft,
-      margin: inStack ? 0 : row.margin,
+      margin: inStack ? 0 : spacingPx(row.margin),
       marginTop,
       marginRight,
       marginBottom,

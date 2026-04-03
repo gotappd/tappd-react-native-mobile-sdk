@@ -161,18 +161,48 @@ function partitionBlocksByRowPin(blocks: any[]) {
   return { flow, pinnedTop, pinnedBottom };
 }
 
-function pinnedStackOuterStyle(block: any, edge: 'top' | 'bottom') {
-  const row = block?.config?.row;
-  const mar = row?.margin ?? 0;
+/** Dashboard / API may send margins as numbers or strings (e.g. "16", "16px"). RN needs numbers for positioning. */
+function rowInsetPx(value: unknown, fallback: number): number {
+  if (value === null || value === undefined || value === '') return fallback;
+  if (typeof value === 'number' && !Number.isNaN(value)) return value;
+  if (typeof value === 'string') {
+    const n = parseFloat(value.replace(/px/gi, '').trim());
+    return Number.isNaN(n) ? fallback : n;
+  }
+  return fallback;
+}
+
+/** Outer shell for pinned row stack (matches RowBlockRenderer.vue pinStyle). */
+function pinnedStackOuterStyle(blocks: any[], edge: 'top' | 'bottom') {
+  if (!blocks?.length) return {};
+  const rows = blocks.map((b) => b?.config?.row).filter(Boolean);
+  const first = rows[0];
+  const mar = rowInsetPx(first?.margin, 0);
+  const left = rowInsetPx(first?.marginLeft, mar);
+  const right = rowInsetPx(first?.marginRight, mar);
+  const edgeInset =
+    edge === 'top'
+      ? Math.max(...rows.map((r) => rowInsetPx(r?.marginTop, mar)))
+      : Math.max(...rows.map((r) => rowInsetPx(r?.marginBottom, mar)));
   const base: any = {
     position: 'absolute' as const,
-    left: row?.marginLeft ?? mar,
-    right: row?.marginRight ?? mar,
+    left,
+    right,
     zIndex: 50,
   };
-  if (edge === 'top') base.top = row?.marginTop ?? mar;
-  else base.bottom = row?.marginBottom ?? mar;
+  if (edge === 'top') base.top = edgeInset;
+  else base.bottom = edgeInset;
   return base;
+}
+
+function pinnedEdgeInsetPx(blocks: any[], edge: 'top' | 'bottom'): number {
+  if (!blocks?.length) return 0;
+  const rows = blocks.map((b) => b?.config?.row).filter(Boolean);
+  if (!rows.length) return 0;
+  const mar = rowInsetPx(rows[0]?.margin, 0);
+  return edge === 'top'
+    ? Math.max(...rows.map((r) => rowInsetPx(r?.marginTop, mar)))
+    : Math.max(...rows.map((r) => rowInsetPx(r?.marginBottom, mar)));
 }
 
 interface PartitionedScrollBodyProps {
@@ -194,12 +224,14 @@ function PartitionedScrollBody({
   const [topInset, setTopInset] = useState(0);
   const [bottomInset, setBottomInset] = useState(0);
   const h = blockHandlers(message, onButtonClick, onFormSubmit);
+  const topEdgePx = pinnedEdgeInsetPx(pinnedTop, 'top');
+  const bottomEdgePx = pinnedEdgeInsetPx(pinnedBottom, 'bottom');
 
   return (
     <View style={{ position: 'relative', flex: 1, minHeight: 80 }}>
       {pinnedTop.length > 0 && (
         <View
-          style={pinnedStackOuterStyle(pinnedTop[0], 'top')}
+          style={pinnedStackOuterStyle(pinnedTop, 'top')}
           onLayout={(e) => setTopInset(e.nativeEvent.layout.height)}
         >
           {pinnedTop.map((block) => (
@@ -215,8 +247,8 @@ function PartitionedScrollBody({
       <ScrollView
         style={scrollStyle}
         contentContainerStyle={{
-          paddingTop: topInset,
-          paddingBottom: bottomInset,
+          paddingTop: topInset + topEdgePx,
+          paddingBottom: bottomInset + bottomEdgePx,
         }}
       >
         {flow.map((block) => (
@@ -225,7 +257,7 @@ function PartitionedScrollBody({
       </ScrollView>
       {pinnedBottom.length > 0 && (
         <View
-          style={pinnedStackOuterStyle(pinnedBottom[0], 'bottom')}
+          style={pinnedStackOuterStyle(pinnedBottom, 'bottom')}
           onLayout={(e) => setBottomInset(e.nativeEvent.layout.height)}
         >
           {pinnedBottom.map((block) => (

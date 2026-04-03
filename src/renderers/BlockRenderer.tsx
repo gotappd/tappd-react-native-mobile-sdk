@@ -21,6 +21,11 @@ export interface BlockRendererProps {
   block: Block;
   onButtonClick?: (link: string, text: string, action?: any) => void;
   onFormSubmit?: (formData: Record<string, any>, submitAction?: any) => void;
+  /**
+   * When row blocks are pinned (top/bottom), they are rendered outside the scroll area.
+   * `inPinnedStack`: margins are zeroed on the row flex to match dashboard preview (outer shell handles offset).
+   */
+  rowPinContext?: 'default' | 'inPinnedStack';
 }
 
 function spacingStyle(s?: SpacingConfig): object {
@@ -267,11 +272,18 @@ function FormBlock({ block, onFormSubmit }: BlockRendererProps) {
   );
 }
 
-function RowBlock({ block, onButtonClick, onFormSubmit }: BlockRendererProps) {
+function RowBlock({ block, onButtonClick, onFormSubmit, rowPinContext = 'default' }: BlockRendererProps) {
   const row = block.config.row;
   if (!row || !row.cells?.length) return null;
 
   const gap = row.gap ?? 8;
+  const mar = row.margin ?? 0;
+  const inStack = rowPinContext === 'inPinnedStack';
+  const marginTop = inStack ? 0 : row.marginTop ?? mar;
+  const marginRight = inStack ? 0 : row.marginRight ?? mar;
+  const marginBottom = inStack ? 0 : row.marginBottom ?? mar;
+  const marginLeft = inStack ? 0 : row.marginLeft ?? mar;
+
   const rowStyle: any = {
     flexDirection: 'row' as const,
     flexWrap: 'wrap' as const,
@@ -289,11 +301,11 @@ function RowBlock({ block, onButtonClick, onFormSubmit }: BlockRendererProps) {
       paddingRight: row.paddingRight,
       paddingBottom: row.paddingBottom,
       paddingLeft: row.paddingLeft,
-      margin: row.margin,
-      marginTop: row.marginTop,
-      marginRight: row.marginRight,
-      marginBottom: row.marginBottom,
-      marginLeft: row.marginLeft,
+      margin: inStack ? 0 : row.margin,
+      marginTop,
+      marginRight,
+      marginBottom,
+      marginLeft,
     }),
   };
 
@@ -317,7 +329,12 @@ function RowBlock({ block, onButtonClick, onFormSubmit }: BlockRendererProps) {
   );
 }
 
-export function BlockRendererComponent({ block, onButtonClick, onFormSubmit }: BlockRendererProps) {
+export function BlockRendererComponent({
+  block,
+  onButtonClick,
+  onFormSubmit,
+  rowPinContext = 'default',
+}: BlockRendererProps) {
   switch (block.type) {
     case 'image':
       return <ImageBlock block={block} />;
@@ -328,7 +345,14 @@ export function BlockRendererComponent({ block, onButtonClick, onFormSubmit }: B
     case 'html':
       return <HtmlBlock block={block} />;
     case 'row':
-      return <RowBlock block={block} onButtonClick={onButtonClick} onFormSubmit={onFormSubmit} />;
+      return (
+        <RowBlock
+          block={block}
+          onButtonClick={onButtonClick}
+          onFormSubmit={onFormSubmit}
+          rowPinContext={rowPinContext}
+        />
+      );
     case 'form':
       return <FormBlock block={block} onButtonClick={onButtonClick} onFormSubmit={onFormSubmit} />;
     case 'input':

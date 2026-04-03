@@ -57,7 +57,7 @@ const tappd = new TappdSDK({
   sessionTimeout: 30, // Session timeout in minutes (default: 30)
   enableAutoScreenTracking: true, // Auto-track screen changes (default: true)
   enableInAppMessages: true, // Enable in-app messages (default: true)
-  messagePollingInterval: 300, // Poll every 5 minutes when active (default: 300 seconds)
+  messagePollingInterval: 60, // Poll interval in seconds when active (default: 60)
   inactivityThreshold: 300, // Stop polling after 5 minutes of inactivity (default: 300 seconds)
   debug: false // Enable debug logging (default: false)
 });
@@ -742,7 +742,7 @@ For detailed endpoint documentation, see [API_ENDPOINTS.md](../API_ENDPOINTS.md)
 
 ## In-App Messages
 
-The SDK supports displaying in-app messages (banners, popups, and modals) created in your Tappd dashboard. Messages are automatically fetched and displayed when enabled using **smart polling** that only polls when users are active.
+The SDK supports IAM from the dashboard (including row/form/input blocks and multi-page messages). Pending messages are fetched on each poll (the SDK does not skip the network just because cached messages exist), so **test IAM typically appears within the polling interval** for an identified user.
 
 ### Configuration
 
@@ -751,21 +751,21 @@ const tappd = new TappdSDK({
   appId: 'YOUR_APP_ID',
   enableInAppMessages: true, // Enable in-app message rendering (default: true)
   autoDisplayMessages: true, // Automatically display pending messages (default: true)
-  messagePollingInterval: 300, // Poll for new messages every 300 seconds (5 minutes) when active (default: 300)
+  messagePollingInterval: 60, // Seconds between polls when active (default: 60)
+  minMessagePollingIntervalSeconds: 15, // Minimum poll interval (default: 15)
+  messageFetchDedupeMs: 2000, // Dedupe rapid repeat fetches (default: 2000; 0 = always fetch)
   inactivityThreshold: 300, // Stop polling after 300 seconds (5 minutes) of inactivity (default: 300)
 });
 ```
 
+Use `await tappd.syncInAppMessages()` for a forced refresh. Use `tappd.processInAppButtonInteraction(...)` and `tappd.submitInAppForm(...)` from your `MessageRenderer` handlers for button actions and form submit.
+
 ### Smart Polling Strategy
 
-The SDK uses an intelligent polling strategy to minimize API calls and improve battery life:
-
-1. **Always Fetch on Launch** - Messages are fetched immediately when the SDK initializes or app launches
-2. **Poll When Active** - Polls for new messages every 5 minutes (configurable) when app is in foreground and user is active
-3. **Stop When Inactive** - Automatically stops polling after 5 minutes (configurable) of user inactivity
-4. **Stop When Backgrounded** - Stops polling immediately when app goes to background
-5. **Resume on Foreground** - Immediately fetches messages and resumes polling when app comes to foreground
-6. **Local Caching** - Messages are cached in AsyncStorage for 5 minutes for offline support and faster display
+1. **Fetch after init** - Pending messages load when the SDK is ready and auto-display is on
+2. **Poll when active** - Default interval 60s (minimum 15s) in foreground
+3. **Stop when inactive / backgrounded** - Per `inactivityThreshold` and AppState
+4. **Dedupe window** - Prevents burst duplicate GETs; new IAM still arrive on the next poll
 
 **Activity Detection:**
 - Tracks user interactions: screen views, events, app state changes

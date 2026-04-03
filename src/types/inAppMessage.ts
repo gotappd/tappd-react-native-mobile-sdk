@@ -1,8 +1,14 @@
 /**
- * Type definitions for In-App Messages (React Native)
+ * In-app message types — aligned with dashboard and `@tappd/web-sdk` (duplicate for RN package independence).
  */
 
-export type InAppMessageType = 'banner' | 'popup' | 'modal' | 'full_screen' | 'notification';
+export type InAppMessageType =
+  | 'banner'
+  | 'popup'
+  | 'modal'
+  | 'full_screen'
+  | 'fullscreen'
+  | 'notification';
 
 export type BannerPosition = 'top' | 'bottom' | 'center';
 
@@ -12,9 +18,22 @@ export type NotificationAnimationDirection = 'up' | 'down' | 'left' | 'right';
 
 export type Alignment = 'left' | 'center' | 'right' | 'full' | 'justify';
 
-export type BlockType = 'image' | 'text' | 'button' | 'html';
+export type BlockType = 'image' | 'text' | 'button' | 'html' | 'row' | 'form' | 'input';
 
-export interface ImageBlockConfig {
+export interface SpacingConfig {
+  padding?: number;
+  paddingTop?: number;
+  paddingRight?: number;
+  paddingBottom?: number;
+  paddingLeft?: number;
+  margin?: number;
+  marginTop?: number;
+  marginRight?: number;
+  marginBottom?: number;
+  marginLeft?: number;
+}
+
+export interface ImageBlockConfig extends SpacingConfig {
   url: string;
   alt?: string;
   width?: string;
@@ -22,7 +41,7 @@ export interface ImageBlockConfig {
   alignment?: Alignment;
 }
 
-export interface TextBlockConfig {
+export interface TextBlockConfig extends SpacingConfig {
   content: string;
   alignment?: Alignment;
   fontSize?: string;
@@ -30,17 +49,80 @@ export interface TextBlockConfig {
   color?: string;
 }
 
-export interface ButtonBlockConfig {
+export type ButtonActionType = 'none' | 'close' | 'track_event' | 'update_profile' | 'link';
+
+export interface ButtonAction {
+  type: ButtonActionType;
+  eventName?: string;
+  eventProperties?: Record<string, any>;
+  profileAttributes?: Record<string, string>;
+  link?: string;
+}
+
+export interface ButtonBlockConfig extends SpacingConfig {
   text: string;
-  link: string;
+  link?: string;
   textColor?: string;
   backgroundColor?: string;
   linkBehavior?: 'deeplink' | 'in_app' | 'browser';
   alignment?: Alignment;
+  action?: ButtonAction;
 }
 
-export interface HtmlBlockConfig {
+export interface HtmlBlockConfig extends SpacingConfig {
   content: string;
+}
+
+export interface RowBlockConfig {
+  columns: number;
+  cells: Block[][];
+  pin?: 'none' | 'top' | 'bottom';
+  backgroundColor?: string;
+  borderWidth?: number;
+  borderStyle?: 'none' | 'solid' | 'dashed' | 'dotted';
+  borderColor?: string;
+  borderRadius?: number;
+  padding?: number;
+  paddingTop?: number;
+  paddingRight?: number;
+  paddingBottom?: number;
+  paddingLeft?: number;
+  margin?: number;
+  marginTop?: number;
+  marginRight?: number;
+  marginBottom?: number;
+  marginLeft?: number;
+  gap?: number;
+}
+
+export type InputType = 'text' | 'email' | 'tel' | 'number' | 'date' | 'textarea' | 'select';
+
+export interface InputField {
+  id: string;
+  label: string;
+  name: string;
+  type: InputType;
+  placeholder?: string;
+  required?: boolean;
+  defaultValue?: string;
+  options?: string[];
+  validation?: {
+    min?: number;
+    max?: number;
+    pattern?: string;
+  };
+}
+
+export interface FormBlockConfig {
+  fields: InputField[];
+  submitButtonText?: string;
+  submitAction?: {
+    type: 'track_event' | 'update_profile' | 'both';
+    eventName?: string;
+    eventProperties?: Record<string, string>;
+    profileAttributes?: Record<string, string>;
+  };
+  alignment?: Alignment;
 }
 
 export interface BlockConfig {
@@ -48,6 +130,9 @@ export interface BlockConfig {
   text?: TextBlockConfig;
   button?: ButtonBlockConfig;
   html?: HtmlBlockConfig;
+  row?: RowBlockConfig;
+  form?: FormBlockConfig;
+  input?: InputField;
 }
 
 export interface Block {
@@ -72,8 +157,13 @@ export interface InAppMessagePage {
 
 export interface MessageContainerSettings {
   displayType?: InAppMessageType;
+  widthMode?: 'full' | 'custom';
+  customWidth?: string;
   maxWidth?: string;
   maxWidthUnit?: 'px' | 'em' | '%';
+  padding?: number;
+  margin?: number;
+  viewportPadding?: number;
   backgroundColor?: string;
   backgroundOpacity?: number;
   backgroundImage?: string;
@@ -82,6 +172,15 @@ export interface MessageContainerSettings {
   borderStyle?: 'solid' | 'dashed' | 'dotted' | 'none';
   borderColor?: string;
   borderRadius?: number;
+  showCloseButton?: boolean;
+  closeButtonPosition?: 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left';
+  closeButtonStyle?: {
+    size?: number;
+    color?: string;
+    icon?: string;
+  };
+  notificationAnimation?: NotificationAnimationDirection;
+  notificationPosition?: 'top' | 'bottom' | 'left' | 'right';
 }
 
 export interface ContentSettings {
@@ -115,7 +214,7 @@ export interface ExpirationConfig {
 }
 
 export interface InAppMessageConfig {
-  messageType: InAppMessageType;
+  messageType?: InAppMessageType;
   blocks?: Block[];
   pages?: InAppMessagePage[];
   position?: BannerPosition;
@@ -123,13 +222,12 @@ export interface InAppMessageConfig {
   backgroundColor?: string;
   dismissible?: boolean;
   closeButton?: boolean;
-  showCloseButton?: boolean; // Control visibility of default close button
-  showNavigationButtons?: boolean; // Control visibility of next/previous buttons
+  showCloseButton?: boolean;
+  showNavigationButtons?: boolean;
   overlay?: boolean;
   overlayOpacity?: number;
-  // Notification-specific settings
-  notificationAnimation?: NotificationAnimationDirection; // Animation direction for notifications
-  notificationPosition?: 'top' | 'bottom' | 'left' | 'right'; // Position for notifications
+  notificationAnimation?: NotificationAnimationDirection;
+  notificationPosition?: 'top' | 'bottom' | 'left' | 'right';
   containerSettings?: MessageContainerSettings;
   contentSettings?: ContentSettings;
   triggerConfig?: TriggerConfig;
@@ -154,7 +252,5 @@ export interface InAppMessage {
   dismissedAt?: Date | string;
   createdAt?: Date | string;
   updatedAt?: Date | string;
-  // Journey metadata for recurring check
-  journeyRecurring?: boolean; // Whether the journey is recurring
+  journeyRecurring?: boolean;
 }
-

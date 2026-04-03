@@ -14,27 +14,72 @@ import {
   ScrollView,
 } from 'react-native';
 import { BlockRendererComponent as BlockRenderer } from './BlockRenderer';
-import type { InAppMessage, InAppMessageConfig } from '../types/inAppMessage';
+import type { InAppMessage, InAppMessageConfig, InAppMessageType } from '../types/inAppMessage';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
-interface MessageRendererProps {
+/**
+ * Match dashboard + web SDK: show close unless explicitly disabled on root or containerSettings.
+ */
+function shouldShowCloseButton(config: InAppMessageConfig): boolean {
+  if (config.showCloseButton === false || config.closeButton === false) {
+    return false;
+  }
+  if (config.containerSettings?.showCloseButton === false) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Resolve layout type when messageType is missing or stale vs containerSettings.displayType.
+ */
+function getEffectiveMessageType(config: InAppMessageConfig): InAppMessageType {
+  const raw = config.messageType ?? config.containerSettings?.displayType ?? 'popup';
+  if (String(raw).toLowerCase() === 'fullscreen') {
+    return 'full_screen';
+  }
+  return raw as InAppMessageType;
+}
+
+export interface MessageRendererProps {
   message: InAppMessage;
   onDismiss: (messageId: string) => void;
-  onButtonClick?: (messageId: string, link: string, text: string) => void;
+  /** Include optional `action` for button blocks (close, track_event, update_profile, link). */
+  onButtonClick?: (messageId: string, link: string, text: string, action?: any) => void;
+  onFormSubmit?: (messageId: string, formData: Record<string, any>, submitAction?: any) => void | Promise<void>;
   onNavigatePage?: (messageId: string, pageIndex: number) => void;
   currentPageIndex?: number;
 }
 
+function blockHandlers(
+  message: InAppMessage,
+  onButtonClick?: MessageRendererProps['onButtonClick'],
+  onFormSubmit?: MessageRendererProps['onFormSubmit']
+) {
+  return {
+    onButtonClick: (link: string, text: string, action?: any) =>
+      onButtonClick?.(message._id, link, text, action),
+    onFormSubmit: (formData: Record<string, any>, submitAction?: any) =>
+      onFormSubmit?.(message._id, formData, submitAction),
+  };
+}
+
 /**
- * Get blocks from message config
+ * Get blocks from message config (pages-first, legacy root blocks as fallback when page has none).
  */
 function getBlocks(config: InAppMessageConfig, pageIndex: number = 0): any[] {
-  // Support both legacy blocks and new pages structure
   if (config.pages && config.pages.length > 0) {
-    // Use specified page's blocks or first page
     const targetPage = config.pages[pageIndex] || config.pages[0];
-    return targetPage.blocks || [];
+    const pageBlocks = targetPage.blocks || [];
+    if (pageBlocks.length > 0) {
+      return pageBlocks;
+    }
+    const legacy = config.blocks || [];
+    if (legacy.length > 0) {
+      return legacy;
+    }
+    return [];
   }
   return config.blocks || [];
 }
@@ -49,10 +94,30 @@ function getCurrentPageIndex(config: InAppMessageConfig, props: MessageRendererP
   return 0;
 }
 
+/** Container sizing from dashboard `containerSettings` (popup/modal). */
+function resolvePopupContainerStyle(config: InAppMessageConfig): Record<string, unknown> {
+  const cs = config.containerSettings;
+  if (!cs) return {};
+  const s: Record<string, unknown> = {};
+  if (cs.widthMode === 'full') {
+    s.width = '100%';
+    s.maxWidth = SCREEN_WIDTH;
+  } else if (cs.customWidth) {
+    s.width = cs.customWidth;
+  }
+  if (cs.padding !== undefined) s.padding = cs.padding;
+  if (cs.margin !== undefined) s.margin = cs.margin;
+  if (cs.maxWidth != null && cs.maxWidthUnit) {
+    const u = cs.maxWidthUnit;
+    s.maxWidth = u === '%' ? `${cs.maxWidth}%` : Number(cs.maxWidth);
+  }
+  return s;
+}
+
 /**
  * Banner Renderer Component
  */
-export function BannerRenderer({ message, onDismiss, onButtonClick }: MessageRendererProps) {
+export function BannerRenderer({ message, onDismiss, onButtonClick, onFormSubmit }: MessageRendererProps) {
   const config = message.config;
   const position = config.position || 'top';
   const blocks = getBlocks(config);
@@ -101,11 +166,7 @@ export function BannerRenderer({ message, onDismiss, onButtonClick }: MessageRen
             <BlockRenderer
               key={block.id}
               block={block}
-              onButtonClick={(link, text) => {
-                if (onButtonClick) {
-                  onButtonClick(message._id, link, text);
-                }
-              }}
+              {...blockHandlers(message, onButtonClick, onFormSubmit)}
             />
           ))}
         </ScrollView>
@@ -125,7 +186,7 @@ export function BannerRenderer({ message, onDismiss, onButtonClick }: MessageRen
 /**
  * Popup Renderer Component
  */
-export function PopupRenderer({ message, onDismiss, onButtonClick, onNavigatePage, currentPageIndex }: MessageRendererProps) {
+export function PopupRenderer({ message, onDismiss, onButtonClick, onFormSubmit, onNavigatePage, currentPageIndex }: MessageRendererProps) {
   const config = message.config;
   const pageIndex = currentPageIndex !== undefined ? currentPageIndex : 0;
   const blocks = getBlocks(config, pageIndex);
@@ -172,6 +233,9 @@ export function PopupRenderer({ message, onDismiss, onButtonClick, onNavigatePag
         style={[
           styles.overlay,
           { backgroundColor: overlay ? `rgba(0, 0, 0, ${overlayOpacity})` : 'transparent' },
+          config.containerSettings?.viewportPadding != null
+            ? { padding: config.containerSettings.viewportPadding }
+            : null,
         ]}
         onPress={handleOverlayPress}
       >
@@ -185,10 +249,11 @@ export function PopupRenderer({ message, onDismiss, onButtonClick, onNavigatePag
                 backgroundColor: '#FFFFFF',
                 maxWidth: SCREEN_WIDTH * 0.9,
                 borderRadius: 8,
+                ...resolvePopupContainerStyle(config),
               },
             ]}
           >
-            {((config.showCloseButton !== false && config.closeButton !== false) && (config.showCloseButton !== undefined || config.closeButton !== undefined)) && (
+            {shouldShowCloseButton(config) && (
               <TouchableOpacity
                 style={styles.closeButton}
                 onPress={() => onDismiss(message._id)}
@@ -201,11 +266,7 @@ export function PopupRenderer({ message, onDismiss, onButtonClick, onNavigatePag
                 <BlockRenderer
                   key={block.id}
                   block={block}
-                  onButtonClick={(link, text) => {
-                    if (onButtonClick) {
-                      onButtonClick(message._id, link, text);
-                    }
-                  }}
+                  {...blockHandlers(message, onButtonClick, onFormSubmit)}
                 />
               ))}
             </ScrollView>
@@ -249,7 +310,7 @@ export function PopupRenderer({ message, onDismiss, onButtonClick, onNavigatePag
 /**
  * Modal Renderer Component (similar to popup but larger)
  */
-export function ModalRenderer({ message, onDismiss, onButtonClick, onNavigatePage, currentPageIndex }: MessageRendererProps) {
+export function ModalRenderer({ message, onDismiss, onButtonClick, onFormSubmit, onNavigatePage, currentPageIndex }: MessageRendererProps) {
   const config = message.config;
   const pageIndex = currentPageIndex !== undefined ? currentPageIndex : 0;
   const blocks = getBlocks(config, pageIndex);
@@ -296,6 +357,9 @@ export function ModalRenderer({ message, onDismiss, onButtonClick, onNavigatePag
         style={[
           styles.overlay,
           { backgroundColor: overlay ? `rgba(0, 0, 0, ${overlayOpacity})` : 'transparent' },
+          config.containerSettings?.viewportPadding != null
+            ? { padding: config.containerSettings.viewportPadding }
+            : null,
         ]}
         onPress={handleOverlayPress}
       >
@@ -310,10 +374,11 @@ export function ModalRenderer({ message, onDismiss, onButtonClick, onNavigatePag
                 maxWidth: SCREEN_WIDTH * 0.85,
                 maxHeight: SCREEN_HEIGHT * 0.8,
                 borderRadius: 8,
+                ...resolvePopupContainerStyle(config),
               },
             ]}
           >
-            {((config.showCloseButton !== false && config.closeButton !== false) && (config.showCloseButton !== undefined || config.closeButton !== undefined)) && (
+            {shouldShowCloseButton(config) && (
               <TouchableOpacity
                 style={styles.closeButton}
                 onPress={() => onDismiss(message._id)}
@@ -326,11 +391,7 @@ export function ModalRenderer({ message, onDismiss, onButtonClick, onNavigatePag
                 <BlockRenderer
                   key={block.id}
                   block={block}
-                  onButtonClick={(link, text) => {
-                    if (onButtonClick) {
-                      onButtonClick(message._id, link, text);
-                    }
-                  }}
+                  {...blockHandlers(message, onButtonClick, onFormSubmit)}
                 />
               ))}
             </ScrollView>
@@ -374,7 +435,7 @@ export function ModalRenderer({ message, onDismiss, onButtonClick, onNavigatePag
 /**
  * Full Screen Renderer Component
  */
-export function FullScreenRenderer({ message, onDismiss, onButtonClick, onNavigatePage, currentPageIndex }: MessageRendererProps) {
+export function FullScreenRenderer({ message, onDismiss, onButtonClick, onFormSubmit, onNavigatePage, currentPageIndex }: MessageRendererProps) {
   const config = message.config;
   const pageIndex = currentPageIndex !== undefined ? currentPageIndex : 0;
   const blocks = getBlocks(config, pageIndex);
@@ -391,7 +452,7 @@ export function FullScreenRenderer({ message, onDismiss, onButtonClick, onNaviga
       }}
     >
       <View style={styles.fullScreenContainer}>
-        {((config.showCloseButton !== false && config.closeButton !== false) && (config.showCloseButton !== undefined || config.closeButton !== undefined)) && (
+        {shouldShowCloseButton(config) && (
           <TouchableOpacity
             style={styles.fullScreenCloseButton}
             onPress={() => onDismiss(message._id)}
@@ -436,11 +497,7 @@ export function FullScreenRenderer({ message, onDismiss, onButtonClick, onNaviga
             <BlockRenderer
               key={block.id}
               block={block}
-              onButtonClick={(link, text) => {
-                if (onButtonClick) {
-                  onButtonClick(message._id, link, text);
-                }
-              }}
+              {...blockHandlers(message, onButtonClick, onFormSubmit)}
             />
           ))}
         </ScrollView>
@@ -452,7 +509,7 @@ export function FullScreenRenderer({ message, onDismiss, onButtonClick, onNaviga
 /**
  * Notification Renderer Component
  */
-export function NotificationRenderer({ message, onDismiss, onButtonClick }: MessageRendererProps) {
+export function NotificationRenderer({ message, onDismiss, onButtonClick, onFormSubmit }: MessageRendererProps) {
   const config = message.config;
   const blocks = getBlocks(config);
   const position = config.notificationPosition || 'top';
@@ -523,14 +580,7 @@ export function NotificationRenderer({ message, onDismiss, onButtonClick }: Mess
     <Animated.View style={[containerStyle, { transform }]}>
       {imageBlock && (
         <View style={{ flexShrink: 0 }}>
-          <BlockRenderer
-            block={imageBlock}
-            onButtonClick={(link, text) => {
-              if (onButtonClick) {
-                onButtonClick(message._id, link, text);
-              }
-            }}
-          />
+          <BlockRenderer block={imageBlock} {...blockHandlers(message, onButtonClick, onFormSubmit)} />
         </View>
       )}
       <View style={{ flex: 1 }}>
@@ -538,15 +588,22 @@ export function NotificationRenderer({ message, onDismiss, onButtonClick }: Mess
           <BlockRenderer
             key={block.id}
             block={block}
-            onButtonClick={(link, text) => {
-              if (onButtonClick) {
-                onButtonClick(message._id, link, text);
-              }
-            }}
+            {...blockHandlers(message, onButtonClick, onFormSubmit)}
           />
         ))}
       </View>
-      {((config.showCloseButton !== false && config.closeButton !== false) && (config.showCloseButton !== undefined || config.closeButton !== undefined)) && (
+      {!imageBlock && textBlocks.length === 0 && blocks.length > 0 && (
+        <View style={{ flex: 1 }}>
+          {blocks.map((block) => (
+            <BlockRenderer
+              key={block.id}
+              block={block}
+              {...blockHandlers(message, onButtonClick, onFormSubmit)}
+            />
+          ))}
+        </View>
+      )}
+      {shouldShowCloseButton(config) && (
         <TouchableOpacity
           style={styles.notificationCloseButton}
           onPress={() => onDismiss(message._id)}
@@ -559,26 +616,83 @@ export function NotificationRenderer({ message, onDismiss, onButtonClick }: Mess
 }
 
 /**
- * Render a message based on its type
+ * Render a message based on its type.
+ * For multi-page IAM, keep `currentPageIndex` in app state and pass `onNavigatePage` to update it.
  */
-export function MessageRenderer({ message, onDismiss, onButtonClick, onNavigatePage, currentPageIndex }: MessageRendererProps) {
+export function MessageRenderer({
+  message,
+  onDismiss,
+  onButtonClick,
+  onFormSubmit,
+  onNavigatePage,
+  currentPageIndex,
+}: MessageRendererProps) {
   const config = message.config;
-  const messageType = config.messageType || 'popup';
+  const messageType = getEffectiveMessageType(config);
 
   switch (messageType) {
     case 'banner':
-      return <BannerRenderer message={message} onDismiss={onDismiss} onButtonClick={onButtonClick} />;
+      return (
+        <BannerRenderer
+          message={message}
+          onDismiss={onDismiss}
+          onButtonClick={onButtonClick}
+          onFormSubmit={onFormSubmit}
+        />
+      );
     case 'popup':
-      // Map popup to modal behavior
-      return <ModalRenderer message={message} onDismiss={onDismiss} onButtonClick={onButtonClick} onNavigatePage={onNavigatePage} currentPageIndex={currentPageIndex} />;
+      return (
+        <ModalRenderer
+          message={message}
+          onDismiss={onDismiss}
+          onButtonClick={onButtonClick}
+          onFormSubmit={onFormSubmit}
+          onNavigatePage={onNavigatePage}
+          currentPageIndex={currentPageIndex}
+        />
+      );
     case 'modal':
-      return <ModalRenderer message={message} onDismiss={onDismiss} onButtonClick={onButtonClick} onNavigatePage={onNavigatePage} currentPageIndex={currentPageIndex} />;
+      return (
+        <ModalRenderer
+          message={message}
+          onDismiss={onDismiss}
+          onButtonClick={onButtonClick}
+          onFormSubmit={onFormSubmit}
+          onNavigatePage={onNavigatePage}
+          currentPageIndex={currentPageIndex}
+        />
+      );
     case 'full_screen':
-      return <FullScreenRenderer message={message} onDismiss={onDismiss} onButtonClick={onButtonClick} onNavigatePage={onNavigatePage} currentPageIndex={currentPageIndex} />;
+      return (
+        <FullScreenRenderer
+          message={message}
+          onDismiss={onDismiss}
+          onButtonClick={onButtonClick}
+          onFormSubmit={onFormSubmit}
+          onNavigatePage={onNavigatePage}
+          currentPageIndex={currentPageIndex}
+        />
+      );
     case 'notification':
-      return <NotificationRenderer message={message} onDismiss={onDismiss} onButtonClick={onButtonClick} />;
+      return (
+        <NotificationRenderer
+          message={message}
+          onDismiss={onDismiss}
+          onButtonClick={onButtonClick}
+          onFormSubmit={onFormSubmit}
+        />
+      );
     default:
-      return <ModalRenderer message={message} onDismiss={onDismiss} onButtonClick={onButtonClick} onNavigatePage={onNavigatePage} currentPageIndex={currentPageIndex} />;
+      return (
+        <ModalRenderer
+          message={message}
+          onDismiss={onDismiss}
+          onButtonClick={onButtonClick}
+          onFormSubmit={onFormSubmit}
+          onNavigatePage={onNavigatePage}
+          currentPageIndex={currentPageIndex}
+        />
+      );
   }
 }
 

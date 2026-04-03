@@ -16,8 +16,12 @@ export interface TappdConfig {
   debug?: boolean; // Enable debug logging
   enableInAppMessages?: boolean; // Enable/disable in-app message rendering (default: true)
   autoDisplayMessages?: boolean; // Automatically display pending messages (default: true)
-  messagePollingInterval?: number; // Interval for polling new messages in seconds when active (default: 300 = 5 minutes)
+  messagePollingInterval?: number; // Interval for polling new messages in seconds when active (default: 60)
+  /** Minimum seconds between poll ticks (default: 15). */
+  minMessagePollingIntervalSeconds?: number;
   inactivityThreshold?: number; // Inactivity threshold in seconds before stopping polling (default: 300 = 5 minutes)
+  /** Skip duplicate IAM API calls within this window in ms when not forceRefresh (default: 2000). Set 0 to always fetch. */
+  messageFetchDedupeMs?: number;
 }
 
 export interface CustomerAttributes {
@@ -53,7 +57,9 @@ export class TappdSDK {
   private enableInAppMessages: boolean;
   private autoDisplayMessages: boolean;
   private messagePollingInterval: number;
-  
+  private minMessagePollingIntervalSeconds: number;
+  private messageFetchDedupeMs: number;
+
   private currentUserId: string | null = null;
   private anonymousId: string | null = null;
   private session: Session | null = null;
@@ -76,6 +82,10 @@ export class TappdSDK {
   private recentEvents: Map<string, number> = new Map(); // eventName -> timestamp (for event triggers)
   private eventTriggeredMessages: Map<string, Set<string>> = new Map(); // eventName -> Set of messageIds waiting for this event
   private messageRenderCallback: ((message: any) => void) | null = null;
+  /** Braze-style: notified after each successful IAM fetch from the API. */
+  private inAppMessageListeners: Array<(event: { messages: any[] }) => void> = [];
+  /** Host sets this to hide the currently visible IAM UI when dismissCurrentInAppMessage() is called. */
+  private dismissCurrentInAppMessageHandler: (() => void) | null = null;
   private bannerCache: Map<string, any> = new Map(); // selector -> banners cache
 
   constructor(config: TappdConfig) {
@@ -87,7 +97,10 @@ export class TappdSDK {
     this.debug = config.debug || false;
     this.enableInAppMessages = config.enableInAppMessages !== false;
     this.autoDisplayMessages = config.autoDisplayMessages !== false;
-    this.messagePollingInterval = config.messagePollingInterval || 300; // Default: 5 minutes (300 seconds)
+    this.messagePollingInterval = config.messagePollingInterval ?? 60;
+    this.minMessagePollingIntervalSeconds = Math.max(5, config.minMessagePollingIntervalSeconds ?? 15);
+    this.messageFetchDedupeMs =
+      config.messageFetchDedupeMs !== undefined ? Math.max(0, config.messageFetchDedupeMs) : 2000;
     this.inactivityThreshold = (config.inactivityThreshold || 300) * 1000; // Convert to milliseconds, default: 5 minutes
 
     if (!this.appId) {
@@ -962,6 +975,50 @@ export class TappdSDK {
   }
 
   /**
+   * Subscribe to in-app message list updates after each successful API fetch (Braze-style `inAppMessageReceived`).
+   * @returns Unsubscribe function
+   */
+  subscribeToInAppMessages(listener: (event: { messages: any[] }) => void): () => void {
+    this.inAppMessageListeners.push(listener);
+    return () => {
+      const i = this.inAppMessageListeners.indexOf(listener);
+      if (i >= 0) {
+        this.inAppMessageListeners.splice(i, 1);
+      }
+    };
+  }
+
+  /**
+   * Host registers how to hide the currently visible IAM UI (e.g. unmount modal). Called by dismissCurrentInAppMessage().
+   */
+  setDismissCurrentInAppMessageHandler(handler: (() => void) | null): void {
+    this.dismissCurrentInAppMessageHandler = handler;
+  }
+
+  /**
+   * Ask the host to hide the current in-app message UI (Braze `hideCurrentInAppMessage` parity). No analytics side effects.
+   */
+  dismissCurrentInAppMessage(): void {
+    if (this.dismissCurrentInAppMessageHandler) {
+      this.dismissCurrentInAppMessageHandler();
+    }
+  }
+
+  private emitInAppMessagesReceived(messages: any[]): void {
+    if (this.inAppMessageListeners.length === 0) {
+      return;
+    }
+    const event = { messages };
+    for (const listener of [...this.inAppMessageListeners]) {
+      try {
+        listener(event);
+      } catch (e) {
+        this.log('[Tappd SDK] inAppMessage listener error:', e);
+      }
+    }
+  }
+
+  /**
    * Initialize in-app messages with smart polling
    */
   private async initializeInAppMessages(): Promise<void> {
@@ -1013,7 +1070,8 @@ export class TappdSDK {
       return;
     }
 
-    this.log('[Tappd SDK] Starting message polling (interval: ' + this.messagePollingInterval + 's)');
+    const intervalSec = Math.max(this.messagePollingInterval, this.minMessagePollingIntervalSeconds);
+    this.log('[Tappd SDK] Starting message polling (interval: ' + intervalSec + 's)');
 
     this.messagePollingTimer = setInterval(() => {
       // Check if user is still active before polling
@@ -1025,7 +1083,7 @@ export class TappdSDK {
         // Stop polling if user became inactive
         this.stopMessagePolling();
       }
-    }, this.messagePollingInterval * 1000);
+    }, intervalSec * 1000);
   }
 
   /**
@@ -1037,6 +1095,13 @@ export class TappdSDK {
       this.messagePollingTimer = null;
       this.log('[Tappd SDK] Message polling stopped');
     }
+  }
+
+  /**
+   * Force-fetch pending IAM from the API and display any new ones.
+   */
+  async syncInAppMessages(): Promise<void> {
+    return this.displayPendingMessages(true);
   }
 
   /**
@@ -1218,9 +1283,13 @@ export class TappdSDK {
       }
     }
     
-    // Use cache if not forcing refresh and we have valid messages
-    if (!forceRefresh && validCachedMessages.length > 0) {
-      this.log('[Tappd SDK] Using cached messages');
+    if (
+      !forceRefresh &&
+      this.messageFetchDedupeMs > 0 &&
+      this.lastFetchTime > 0 &&
+      Date.now() - this.lastFetchTime < this.messageFetchDedupeMs
+    ) {
+      this.log('[Tappd SDK] Using cached messages (fetch dedupe window)');
       return validCachedMessages;
     }
 
@@ -1300,8 +1369,9 @@ export class TappdSDK {
       this.lastFetchTime = Date.now();
       await this.saveMessageCache();
 
-      this.log('[Tappd SDK] Fetched ' + messages.length + ' messages from API');
-      return messages;
+      this.log('[Tappd SDK] Fetched ' + validMessages.length + ' valid message(s) from API');
+      this.emitInAppMessagesReceived(validMessages);
+      return validMessages;
     } catch (error) {
       // Fallback to stale cache if API fails (filter expired messages)
       if (this.messageCache.size > 0) {
@@ -1823,6 +1893,135 @@ export class TappdSDK {
       });
     } catch (error) {
       this.log('[Tappd SDK] Track banner dismiss error:', error);
+    }
+  }
+
+  /**
+   * Handle IAM form submit (call from MessageRenderer `onFormSubmit` or custom UI).
+   */
+  async submitInAppForm(
+    messageId: string,
+    formData: Record<string, any>,
+    submitAction?: any
+  ): Promise<void> {
+    await this.trackMessageEvent(messageId, 'form_submitted', {
+      fieldKeys: Object.keys(formData || {}),
+    });
+    await this.captureFormData(messageId, formData, submitAction);
+  }
+
+  /**
+   * Process IAM button `action` (call from `onButtonClick` when action is present).
+   */
+  async processInAppButtonInteraction(
+    messageId: string,
+    link: string,
+    text: string,
+    action?: any
+  ): Promise<void> {
+    await this.trackMessageEvent(messageId, 'clicked', {
+      buttonText: text,
+      buttonLink: link,
+      actionType: action?.type,
+    });
+
+    if (!action || action.type === 'none') {
+      if (link && link !== '#') {
+        const canOpen = await Linking.canOpenURL(link);
+        if (canOpen) await Linking.openURL(link);
+      }
+      return;
+    }
+
+    if (action.type === 'close') {
+      await this.dismissMessage(messageId);
+      return;
+    }
+    if (action.type === 'track_event') {
+      await this.handleBridgeAction(messageId, 'track_event', {
+        eventName: action.eventName,
+        eventProperties: action.eventProperties,
+      });
+      return;
+    }
+    if (action.type === 'update_profile') {
+      await this.handleBridgeAction(messageId, 'update_profile', {
+        profileAttributes: action.profileAttributes,
+      });
+      return;
+    }
+    if (action.type === 'link') {
+      const target = action.link || link;
+      if (target && target !== '#') {
+        const canOpen = await Linking.canOpenURL(target);
+        if (canOpen) await Linking.openURL(target);
+      }
+    }
+  }
+
+  private async handleBridgeAction(
+    messageId: string,
+    actionType: string,
+    actionData: any,
+    formData?: Record<string, any>
+  ): Promise<void> {
+    try {
+      const userId = this.currentUserId || this.anonymousId;
+      const externalId = await this.getExternalId();
+
+      const response = await fetch(`${this.apiUrl}/bridge/action`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-App-Id': this.appId,
+        },
+        body: JSON.stringify({
+          messageId,
+          actionType,
+          actionData,
+          formData,
+          userId,
+          external_id: externalId || undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Request failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      this.log('[Tappd SDK] Bridge action error:', error);
+    }
+  }
+
+  private async captureFormData(
+    messageId: string,
+    formData: Record<string, any>,
+    submitAction?: any
+  ): Promise<void> {
+    try {
+      const userId = this.currentUserId || this.anonymousId;
+      const externalId = await this.getExternalId();
+
+      const response = await fetch(`${this.apiUrl}/bridge/capture`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-App-Id': this.appId,
+        },
+        body: JSON.stringify({
+          messageId,
+          formData,
+          submitAction,
+          userId,
+          external_id: externalId || undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Request failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      this.log('[Tappd SDK] Form capture error:', error);
     }
   }
 }

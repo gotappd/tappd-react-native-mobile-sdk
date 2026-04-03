@@ -1,6 +1,6 @@
 {
   "name": "@tappd/react-native-sdk",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Tappd Mobile SDK for React Native (iOS & Android) - Customer Data Platform SDK",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

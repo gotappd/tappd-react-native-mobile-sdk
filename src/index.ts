@@ -721,15 +721,36 @@ export class TappdSDK {
    *
    * Still your responsibility: request permission, `getToken()`, and `registerPushToken()` with Tappd.
    *
+   * Pass **`messaging()`** (call the default export). Passing the module without `()` fails the guard below.
+   *
+   * **Foreground (Android):** FCM does not show a tray notification while the app is open unless you display one
+   * (e.g. Notifee). If you replaced your only `onMessage` with this helper, use `options.onForegroundMessage`
+   * to keep showing notifications for non-IAM pushes.
+   *
    * @returns Unsubscribe for `onMessage` and `onNotificationOpenedApp` (call on teardown if needed).
    */
-  registerFirebaseMessagingForInAppMessages(messaging: {
-    onMessage: (handler: (remoteMessage: any) => void | Promise<void>) => () => void;
-    onNotificationOpenedApp: (handler: (remoteMessage: any) => void | Promise<void>) => () => void;
-    getInitialNotification: () => Promise<any | null>;
-  }): () => void {
+  registerFirebaseMessagingForInAppMessages(
+    messaging: {
+      onMessage: (handler: (remoteMessage: any) => void | Promise<void>) => () => void;
+      onNotificationOpenedApp: (handler: (remoteMessage: any) => void | Promise<void>) => () => void;
+      getInitialNotification: () => Promise<any | null>;
+    },
+    options?: {
+      /** Called after IAM handling for every foreground message (e.g. Notifee `displayNotification`). */
+      onForegroundMessage?: (remoteMessage: any) => void | Promise<void>;
+    }
+  ): () => void {
+    if (typeof messaging?.onMessage !== 'function') {
+      throw new Error(
+        '[Tappd SDK] registerFirebaseMessagingForInAppMessages: pass messaging() (call the function), not the module.'
+      );
+    }
     const unsubOnMessage = messaging.onMessage((remoteMessage: any) => {
-      void this.handleForegroundPushForInAppMessages(remoteMessage);
+      void Promise.resolve(this.handleForegroundPushForInAppMessages(remoteMessage))
+        .then(() => options?.onForegroundMessage?.(remoteMessage))
+        .catch((e) => {
+          this.log('[Tappd SDK] onForegroundMessage error:', e);
+        });
     });
     const unsubOpened = messaging.onNotificationOpenedApp((remoteMessage: any) => {
       void this.handleNotificationOpenForInAppMessages(remoteMessage);

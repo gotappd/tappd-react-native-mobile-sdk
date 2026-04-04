@@ -240,6 +240,21 @@ const unsubscribe = tappd.registerFirebaseMessagingForInAppMessages(messaging())
 // optional: unsubscribe() on app teardown
 ```
 
+**Important**
+
+- Pass **`messaging()`** (with parentheses). Passing `messaging` without calling it throws a clear error from the SDK.
+- **Android, app in foreground:** FCM does **not** show a banner/tray notification automatically. If you used to have your own `onMessage` that called Notifee / another library, keep that — either wire manually (IAM handler + your code) or pass the second argument:
+
+```javascript
+tappd.registerFirebaseMessagingForInAppMessages(messaging(), {
+  onForegroundMessage: async (msg) => {
+    // Your existing logic, e.g. Notifee.displayNotification(...)
+  },
+});
+```
+
+If you **only** registered the Tappd helper and removed all other foreground handling, it can look like “no push” while the app is open even though the message was delivered to JS.
+
 ### In-app message sync pushes (test from dashboard)
 
 When you use **Send test push** on an in-app message in the Tappd dashboard, the API sends an FCM message whose **data** includes `tappd_message_type`, `iamId`, and `tappd_iam_sync`. Wire **all** of the handlers above (including `getInitialNotification`) so that:
@@ -473,9 +488,11 @@ Pass the result of `messaging().getInitialNotification()` (or `null`) so IAM syn
 
 ---
 
-#### `registerFirebaseMessagingForInAppMessages(messaging)`
+#### `registerFirebaseMessagingForInAppMessages(messaging, options?)`
 
-Registers `onMessage`, `onNotificationOpenedApp`, and `getInitialNotification` for IAM sync. Pass your Firebase `messaging()` instance; the SDK does not add a dependency on `@react-native-firebase/messaging`.
+Registers `onMessage`, `onNotificationOpenedApp`, and `getInitialNotification` for IAM sync. Pass **`messaging()`** (the return value of the default export).
+
+Optional **`options.onForegroundMessage`**: invoked after IAM handling for every foreground message — use to show a local notification (e.g. Notifee) on Android when the app is open.
 
 **Returns:** `() => void` — call the returned function to unsubscribe foreground/background-open listeners.
 

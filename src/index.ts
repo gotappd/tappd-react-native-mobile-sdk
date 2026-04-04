@@ -2119,4 +2119,15 @@ export class TappdSDK {
   }
 }
 
+export {
+  MessageRenderer,
+  BannerRenderer,
+  PopupRenderer,
+  ModalRenderer,
+  FullScreenRenderer,
+  NotificationRenderer,
+} from './renderers/MessageRenderer';
+export type { MessageRendererProps } from './renderers/MessageRenderer';
+export type { InAppMessage, InAppMessageConfig } from './types/inAppMessage';
+
 export default TappdSDK;

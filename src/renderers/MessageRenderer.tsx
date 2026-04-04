@@ -27,7 +27,7 @@ import {
   IAM_DEFAULT_OVERLAY_OPACITY,
   IAM_DEFAULT_VIEWPORT_PADDING_PX,
   IAM_MODAL_SCALE_ENTER_START,
-} from '@tappd/shared';
+} from '../constants/iamLayoutDefaults';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 

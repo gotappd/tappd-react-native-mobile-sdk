@@ -820,9 +820,11 @@ Use `await tappd.syncInAppMessages()` for a forced refresh. Use `tappd.processIn
 
 To render messages in your React Native app, you need to set up a render callback:
 
-```javascript
-import { MessageRenderer } from '@tappd/react-native-sdk/src/renderers/MessageRenderer';
-import type { InAppMessage } from '@tappd/react-native-sdk/src/types/inAppMessage';
+```tsx
+import TappdSDK, {
+  MessageRenderer,
+  type InAppMessage,
+} from '@tappd/react-native-sdk';
 
 const tappd = new TappdSDK({
   appId: 'YOUR_APP_ID',

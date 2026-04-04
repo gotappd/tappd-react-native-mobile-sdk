@@ -6,9 +6,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { View, StyleSheet } from 'react-native';
-import TappdSDK from '@tappd/react-native-sdk';
-import { MessageRenderer } from '@tappd/react-native-sdk/src/renderers/MessageRenderer';
-import type { InAppMessage } from '@tappd/react-native-sdk/src/types/inAppMessage';
+import TappdSDK, { MessageRenderer, type InAppMessage } from '@tappd/react-native-sdk';
 
 // Initialize SDK with in-app messages enabled
 const tappd = new TappdSDK({

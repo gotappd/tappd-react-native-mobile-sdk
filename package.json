@@ -3,6 +3,8 @@
   "version": "1.0.9",
   "description": "Tappd Mobile SDK for React Native (iOS & Android) - Customer Data Platform SDK",
   "main": "dist/index.js",
+  "module": "dist/index.js",
+  "react-native": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
     "dist",
@@ -36,7 +38,6 @@
   "author": "Tappd",
   "license": "MIT",
   "dependencies": {
-    "@tappd/shared": "file:../shared",
     "react-native-render-html": "^6.3.4"
   },
   "peerDependencies": {

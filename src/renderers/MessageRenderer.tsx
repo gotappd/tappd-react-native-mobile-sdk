@@ -21,6 +21,13 @@ import type {
   InAppMessageType,
   MessageContainerSettings,
 } from '../types/inAppMessage';
+import {
+  IAM_ANIMATION_ENTER_DURATION_MS,
+  IAM_BANNER_OUTER_PADDING_PX,
+  IAM_DEFAULT_OVERLAY_OPACITY,
+  IAM_DEFAULT_VIEWPORT_PADDING_PX,
+  IAM_MODAL_SCALE_ENTER_START,
+} from '@tappd/shared';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -341,7 +348,7 @@ export function BannerRenderer({ message, onDismiss, onButtonClick, onFormSubmit
   useEffect(() => {
     Animated.timing(fadeAnim, {
       toValue: 1,
-      duration: 300,
+      duration: IAM_ANIMATION_ENTER_DURATION_MS,
       useNativeDriver: true,
     }).start();
   }, []);
@@ -352,7 +359,7 @@ export function BannerRenderer({ message, onDismiss, onButtonClick, onFormSubmit
     right: 0,
     width: '100%',
     zIndex: 9999,
-    padding: 12,
+    padding: IAM_BANNER_OUTER_PADDING_PX,
     borderBottomWidth: position === 'top' ? 1 : 0,
     borderTopWidth: position === 'bottom' ? 1 : 0,
     borderColor: '#E0E0E0',
@@ -438,15 +445,15 @@ export function PopupRenderer({ message, onDismiss, onButtonClick, onFormSubmit,
   const pageIndex = currentPageIndex !== undefined ? currentPageIndex : 0;
   const blocks = getBlocks(config, pageIndex);
   const overlay = config.overlay !== false;
-  const overlayOpacity = config.overlayOpacity || 0.5;
+  const overlayOpacity = config.overlayOpacity ?? IAM_DEFAULT_OVERLAY_OPACITY;
   const [fadeAnim] = useState(new Animated.Value(0));
-  const [scaleAnim] = useState(new Animated.Value(0.9));
+  const [scaleAnim] = useState(new Animated.Value(IAM_MODAL_SCALE_ENTER_START));
 
   useEffect(() => {
     Animated.parallel([
       Animated.timing(fadeAnim, {
         toValue: 1,
-        duration: 300,
+        duration: IAM_ANIMATION_ENTER_DURATION_MS,
         useNativeDriver: true,
       }),
       Animated.spring(scaleAnim, {
@@ -464,6 +471,9 @@ export function PopupRenderer({ message, onDismiss, onButtonClick, onFormSubmit,
     }
   };
 
+  const viewportPad =
+    config.containerSettings?.viewportPadding ?? IAM_DEFAULT_VIEWPORT_PADDING_PX;
+
   return (
     <Modal
       transparent
@@ -480,9 +490,7 @@ export function PopupRenderer({ message, onDismiss, onButtonClick, onFormSubmit,
         style={[
           styles.overlay,
           { backgroundColor: overlay ? `rgba(0, 0, 0, ${overlayOpacity})` : 'transparent' },
-          config.containerSettings?.viewportPadding != null
-            ? { padding: config.containerSettings.viewportPadding }
-            : null,
+          { padding: viewportPad },
         ]}
         onPress={handleOverlayPress}
       >
@@ -556,15 +564,15 @@ export function ModalRenderer({ message, onDismiss, onButtonClick, onFormSubmit,
   const pageIndex = currentPageIndex !== undefined ? currentPageIndex : 0;
   const blocks = getBlocks(config, pageIndex);
   const overlay = config.overlay !== false;
-  const overlayOpacity = config.overlayOpacity || 0.5;
+  const overlayOpacity = config.overlayOpacity ?? IAM_DEFAULT_OVERLAY_OPACITY;
   const [fadeAnim] = useState(new Animated.Value(0));
-  const [scaleAnim] = useState(new Animated.Value(0.9));
+  const [scaleAnim] = useState(new Animated.Value(IAM_MODAL_SCALE_ENTER_START));
 
   useEffect(() => {
     Animated.parallel([
       Animated.timing(fadeAnim, {
         toValue: 1,
-        duration: 300,
+        duration: IAM_ANIMATION_ENTER_DURATION_MS,
         useNativeDriver: true,
       }),
       Animated.spring(scaleAnim, {
@@ -582,6 +590,9 @@ export function ModalRenderer({ message, onDismiss, onButtonClick, onFormSubmit,
     }
   };
 
+  const viewportPad =
+    config.containerSettings?.viewportPadding ?? IAM_DEFAULT_VIEWPORT_PADDING_PX;
+
   return (
     <Modal
       transparent
@@ -598,9 +609,7 @@ export function ModalRenderer({ message, onDismiss, onButtonClick, onFormSubmit,
         style={[
           styles.overlay,
           { backgroundColor: overlay ? `rgba(0, 0, 0, ${overlayOpacity})` : 'transparent' },
-          config.containerSettings?.viewportPadding != null
-            ? { padding: config.containerSettings.viewportPadding }
-            : null,
+          { padding: viewportPad },
         ]}
         onPress={handleOverlayPress}
       >

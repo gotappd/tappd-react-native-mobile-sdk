@@ -36,6 +36,7 @@
   "author": "Tappd",
   "license": "MIT",
   "dependencies": {
+    "@tappd/shared": "file:../shared",
     "react-native-render-html": "^6.3.4"
   },
   "peerDependencies": {

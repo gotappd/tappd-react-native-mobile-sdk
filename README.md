@@ -213,7 +213,27 @@ if (enabled) {
 messaging().onTokenRefresh(async (token) => {
   await tappd.registerPushToken(token, Platform.OS === 'ios' ? 'ios' : 'android');
 });
+
+// In-app message (IAM) test / sync pushes from the dashboard or journeys
+// Data payload includes tappd_message_type (iam_test | iam_sync), iamId, tappd_iam_sync.
+// Foreground: sync silently — do not show an extra local notification for these.
+messaging().onMessage(async (remoteMessage) => {
+  await tappd.handleForegroundPushForInAppMessages(remoteMessage);
+});
+
+messaging().onNotificationOpenedApp(async (remoteMessage) => {
+  await tappd.handleNotificationOpenForInAppMessages(remoteMessage);
+});
 ```
+
+### In-app message sync pushes (test from dashboard)
+
+When you use **Send test push** on an in-app message in the Tappd dashboard, the API sends an FCM message whose **data** includes `tappd_message_type`, `iamId`, and `tappd_iam_sync`. Wire the handlers above so that:
+
+- **App already open (foreground):** `handleForegroundPushForInAppMessages` fetches and shows the IAM without a disruptive notification.
+- **App in background:** the system may show the notification; when the user taps it, `handleNotificationOpenForInAppMessages` records the open and displays the IAM.
+
+See also `packages/shared/PUSH_IAM.md` for the full payload contract.
 
 ## API Reference
 
@@ -401,6 +421,30 @@ console.log('Device Count:', status.deviceCount);
 **Returns:** `Promise<{ subscribed: boolean; status: string; deviceCount: number }>`
 
 **Note:** User must be identified first using `identify()`.
+
+---
+
+#### `trackPushOpen(remoteMessage)`
+
+Track a push notification open (call from your notification handler with the FCM message object).
+
+**Returns:** `Promise<void>`
+
+---
+
+#### `handleForegroundPushForInAppMessages(remoteMessage)`
+
+Handle IAM test/sync pushes while the app is in the **foreground** (`messaging().onMessage`). Syncs IAMs without requiring a visible notification.
+
+**Returns:** `Promise<void>`
+
+---
+
+#### `handleNotificationOpenForInAppMessages(remoteMessage)`
+
+Handle when the user **opens** a notification that carries IAM sync data (`onNotificationOpenedApp` / initial notification).
+
+**Returns:** `Promise<void>`
 
 ---
 

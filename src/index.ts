@@ -595,6 +595,74 @@ export class TappdSDK {
   }
 
   /**
+   * Returns true if FCM/APNs `data` payload is an IAM sync/test push from Tappd
+   * (`tappd_message_type` / `tappd_iam_sync`). Data values are often strings.
+   */
+  private isIamSyncPushData(data: Record<string, unknown> | undefined | null): boolean {
+    if (!data || typeof data !== 'object') {
+      return false;
+    }
+    const t = data.tappd_message_type;
+    if (t === 'iam_test' || t === 'iam_sync') {
+      return true;
+    }
+    const sync = data.tappd_iam_sync;
+    if (sync === '1' || sync === 1 || sync === true) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Call from Firebase `onMessage` when the app is in the **foreground**.
+   * For IAM test/sync pushes, syncs messages without showing an OS notification (you should not display a local notification for these).
+   */
+  async handleForegroundPushForInAppMessages(remoteMessage: any): Promise<void> {
+    try {
+      if (!this.enableInAppMessages) {
+        return;
+      }
+      const data = remoteMessage?.data;
+      if (!this.isIamSyncPushData(data)) {
+        return;
+      }
+      await this.syncInAppMessages();
+      const rawId = data?.iamId ?? data?.iam_id;
+      const iamId = typeof rawId === 'string' ? rawId : rawId != null ? String(rawId) : '';
+      if (iamId) {
+        await this.triggerInAppMessageById(iamId, true);
+      }
+    } catch (error) {
+      this.log('[Tappd SDK] handleForegroundPushForInAppMessages error:', error);
+    }
+  }
+
+  /**
+   * Call when the user **opens** a notification (background / quit state).
+   * Tracks the open, then syncs and optionally shows the IAM for `iamId`.
+   */
+  async handleNotificationOpenForInAppMessages(remoteMessage: any): Promise<void> {
+    try {
+      if (!this.enableInAppMessages) {
+        return;
+      }
+      const data = remoteMessage?.data;
+      const rawId = data?.iamId ?? data?.iam_id;
+      const iamId = typeof rawId === 'string' ? rawId : rawId != null ? String(rawId) : '';
+      if (!this.isIamSyncPushData(data) && !iamId) {
+        return;
+      }
+      await this.trackPushOpen(remoteMessage);
+      await this.syncInAppMessages();
+      if (iamId) {
+        await this.triggerInAppMessageById(iamId, true);
+      }
+    } catch (error) {
+      this.log('[Tappd SDK] handleNotificationOpenForInAppMessages error:', error);
+    }
+  }
+
+  /**
    * Track screen view (equivalent to page view in web)
    */
   async trackScreen(screenName: string, properties?: EventProperties): Promise<void> {
@@ -1469,9 +1537,13 @@ export class TappdSDK {
   async triggerInAppMessageById(messageId: string, forceRefresh = true): Promise<void> {
     try {
       const messages = await this.getInAppMessages(forceRefresh);
-      const target = messages.find(
-        (msg: any) => msg && (msg._id === messageId || msg.id === messageId),
-      );
+      const want = String(messageId);
+      const target = messages.find((msg: any) => {
+        if (!msg) return false;
+        const id = msg._id != null ? String(msg._id) : '';
+        const alt = msg.id != null ? String(msg.id) : '';
+        return id === want || alt === want;
+      });
       if (!target) {
         this.log('[Tappd SDK] triggerInAppMessageById: no message found for id:', messageId);
         return;

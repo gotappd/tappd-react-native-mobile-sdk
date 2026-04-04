@@ -214,7 +214,9 @@ messaging().onTokenRefresh(async (token) => {
   await tappd.registerPushToken(token, Platform.OS === 'ios' ? 'ios' : 'android');
 });
 
-// In-app message (IAM) test / sync pushes from the dashboard or journeys
+// In-app message (IAM) test / sync — either wire manually (below) or use one call:
+// tappd.registerFirebaseMessagingForInAppMessages(messaging());
+
 // Data payload includes tappd_message_type (iam_test | iam_sync), iamId, tappd_iam_sync.
 // Foreground: sync silently — do not show an extra local notification for these.
 messaging().onMessage(async (remoteMessage) => {
@@ -224,14 +226,29 @@ messaging().onMessage(async (remoteMessage) => {
 messaging().onNotificationOpenedApp(async (remoteMessage) => {
   await tappd.handleNotificationOpenForInAppMessages(remoteMessage);
 });
+
+// Cold start: user tapped a notification while the app was fully quit
+messaging()
+  .getInitialNotification()
+  .then((remoteMessage) => tappd.handleInitialNotificationForInAppMessages(remoteMessage));
+```
+
+Equivalent one-liner (recommended so you do not miss `getInitialNotification`):
+
+```javascript
+const unsubscribe = tappd.registerFirebaseMessagingForInAppMessages(messaging());
+// optional: unsubscribe() on app teardown
 ```
 
 ### In-app message sync pushes (test from dashboard)
 
-When you use **Send test push** on an in-app message in the Tappd dashboard, the API sends an FCM message whose **data** includes `tappd_message_type`, `iamId`, and `tappd_iam_sync`. Wire the handlers above so that:
+When you use **Send test push** on an in-app message in the Tappd dashboard, the API sends an FCM message whose **data** includes `tappd_message_type`, `iamId`, and `tappd_iam_sync`. Wire **all** of the handlers above (including `getInitialNotification`) so that:
 
-- **App already open (foreground):** `handleForegroundPushForInAppMessages` fetches and shows the IAM without a disruptive notification.
-- **App in background:** the system may show the notification; when the user taps it, `handleNotificationOpenForInAppMessages` records the open and displays the IAM.
+- **App already open (foreground):** `handleForegroundPushForInAppMessages` runs from `onMessage` and syncs/shows the IAM.
+- **App in background:** Firebase usually **does not** call `onMessage` when the payload includes both `notification` and `data` (the tray notification is shown instead). IAM sync runs when the user **taps** the notification (`onNotificationOpenedApp`), not when the notification merely appears.
+- **App quit → user taps notification:** use `getInitialNotification` + `handleInitialNotificationForInAppMessages`.
+
+If the push is “received” (tray) but nothing syncs until you open the app from the icon, that is expected on Android until the user taps the notification or you rely on IAM polling.
 
 See also `packages/shared/PUSH_IAM.md` for the full payload contract.
 
@@ -442,9 +459,25 @@ Handle IAM test/sync pushes while the app is in the **foreground** (`messaging()
 
 #### `handleNotificationOpenForInAppMessages(remoteMessage)`
 
-Handle when the user **opens** a notification that carries IAM sync data (`onNotificationOpenedApp` / initial notification).
+Handle when the user **opens** a notification that carries IAM sync data (`onNotificationOpenedApp`).
 
 **Returns:** `Promise<void>`
+
+---
+
+#### `handleInitialNotificationForInAppMessages(remoteMessage)`
+
+Pass the result of `messaging().getInitialNotification()` (or `null`) so IAM sync runs when the app was opened from a **quit** state by tapping a push.
+
+**Returns:** `Promise<void>`
+
+---
+
+#### `registerFirebaseMessagingForInAppMessages(messaging)`
+
+Registers `onMessage`, `onNotificationOpenedApp`, and `getInitialNotification` for IAM sync. Pass your Firebase `messaging()` instance; the SDK does not add a dependency on `@react-native-firebase/messaging`.
+
+**Returns:** `() => void` — call the returned function to unsubscribe foreground/background-open listeners.
 
 ---
 

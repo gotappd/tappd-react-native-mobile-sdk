@@ -595,6 +595,31 @@ export class TappdSDK {
   }
 
   /**
+   * Flatten FCM `data` from a React Native Firebase `RemoteMessage`.
+   * Values are usually string key/value pairs; handles rare stringified `data`.
+   */
+  private extractFirebaseDataPayload(remoteMessage: any): Record<string, unknown> | null {
+    if (!remoteMessage || typeof remoteMessage !== 'object') {
+      return null;
+    }
+    let raw = remoteMessage.data;
+    if (raw == null) {
+      return null;
+    }
+    if (typeof raw === 'string') {
+      try {
+        raw = JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    }
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      return null;
+    }
+    return raw as Record<string, unknown>;
+  }
+
+  /**
    * Returns true if FCM/APNs `data` payload is an IAM sync/test push from Tappd
    * (`tappd_message_type` / `tappd_iam_sync`). Data values are often strings.
    */
@@ -603,32 +628,49 @@ export class TappdSDK {
       return false;
     }
     const t = data.tappd_message_type;
-    if (t === 'iam_test' || t === 'iam_sync') {
+    const ts =
+      typeof t === 'string'
+        ? t.toLowerCase().trim()
+        : t != null
+          ? String(t).toLowerCase().trim()
+          : '';
+    if (ts === 'iam_test' || ts === 'iam_sync') {
       return true;
     }
     const sync = data.tappd_iam_sync;
-    if (sync === '1' || sync === 1 || sync === true) {
+    if (sync === '1' || sync === 1 || sync === true || sync === 'true') {
       return true;
     }
     return false;
   }
 
+  private resolveIamIdFromPushData(data: Record<string, unknown>): string {
+    const rawId = data.iamId ?? data.iam_id ?? (data as { iamid?: unknown }).iamid;
+    if (typeof rawId === 'string') {
+      return rawId;
+    }
+    return rawId != null ? String(rawId) : '';
+  }
+
   /**
    * Call from Firebase `onMessage` when the app is in the **foreground**.
    * For IAM test/sync pushes, syncs messages without showing an OS notification (you should not display a local notification for these).
+   *
+   * **Android:** If the message includes a `notification` block and the app is in the **background**,
+   * `onMessage` is typically **not** invoked — use `onNotificationOpenedApp` and `getInitialNotification`
+   * with {@link handleNotificationOpenForInAppMessages} / {@link handleInitialNotificationForInAppMessages}.
    */
   async handleForegroundPushForInAppMessages(remoteMessage: any): Promise<void> {
     try {
       if (!this.enableInAppMessages) {
         return;
       }
-      const data = remoteMessage?.data;
-      if (!this.isIamSyncPushData(data)) {
+      const data = this.extractFirebaseDataPayload(remoteMessage);
+      if (!data || !this.isIamSyncPushData(data)) {
         return;
       }
       await this.syncInAppMessages();
-      const rawId = data?.iamId ?? data?.iam_id;
-      const iamId = typeof rawId === 'string' ? rawId : rawId != null ? String(rawId) : '';
+      const iamId = this.resolveIamIdFromPushData(data);
       if (iamId) {
         await this.triggerInAppMessageById(iamId, true);
       }
@@ -646,10 +688,9 @@ export class TappdSDK {
       if (!this.enableInAppMessages) {
         return;
       }
-      const data = remoteMessage?.data;
-      const rawId = data?.iamId ?? data?.iam_id;
-      const iamId = typeof rawId === 'string' ? rawId : rawId != null ? String(rawId) : '';
-      if (!this.isIamSyncPushData(data) && !iamId) {
+      const data = this.extractFirebaseDataPayload(remoteMessage);
+      const iamId = data ? this.resolveIamIdFromPushData(data) : '';
+      if (!this.isIamSyncPushData(data || null) && !iamId) {
         return;
       }
       await this.trackPushOpen(remoteMessage);
@@ -660,6 +701,54 @@ export class TappdSDK {
     } catch (error) {
       this.log('[Tappd SDK] handleNotificationOpenForInAppMessages error:', error);
     }
+  }
+
+  /**
+   * Call once after Firebase is ready (e.g. app root `useEffect`) with the result of
+   * `messaging().getInitialNotification()` so IAM sync runs when the user opened the app
+   * from a notification (app was quit).
+   */
+  async handleInitialNotificationForInAppMessages(remoteMessage: any | null | undefined): Promise<void> {
+    if (!remoteMessage) {
+      return;
+    }
+    await this.handleNotificationOpenForInAppMessages(remoteMessage);
+  }
+
+  /**
+   * Wires React Native Firebase `messaging()` to IAM handlers in one place.
+   * The SDK does **not** depend on `@react-native-firebase/messaging` — pass the module instance from your app.
+   *
+   * Still your responsibility: request permission, `getToken()`, and `registerPushToken()` with Tappd.
+   *
+   * @returns Unsubscribe for `onMessage` and `onNotificationOpenedApp` (call on teardown if needed).
+   */
+  registerFirebaseMessagingForInAppMessages(messaging: {
+    onMessage: (handler: (remoteMessage: any) => void | Promise<void>) => () => void;
+    onNotificationOpenedApp: (handler: (remoteMessage: any) => void | Promise<void>) => () => void;
+    getInitialNotification: () => Promise<any | null>;
+  }): () => void {
+    const unsubOnMessage = messaging.onMessage((remoteMessage: any) => {
+      void this.handleForegroundPushForInAppMessages(remoteMessage);
+    });
+    const unsubOpened = messaging.onNotificationOpenedApp((remoteMessage: any) => {
+      void this.handleNotificationOpenForInAppMessages(remoteMessage);
+    });
+    void messaging.getInitialNotification().then((remoteMessage) => {
+      void this.handleInitialNotificationForInAppMessages(remoteMessage);
+    });
+    return () => {
+      try {
+        unsubOnMessage();
+      } catch {
+        /* noop */
+      }
+      try {
+        unsubOpened();
+      } catch {
+        /* noop */
+      }
+    };
   }
 
   /**

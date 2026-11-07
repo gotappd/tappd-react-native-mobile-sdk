@@ -5,6 +5,8 @@
 
 export const IAM_BANNER_OUTER_PADDING_PX = 12;
 export const IAM_DEFAULT_VIEWPORT_PADDING_PX = 20;
+/** Inner scroll padding for fullscreen IAM — dashboard preview is edge-to-edge. */
+export const IAM_FULLSCREEN_SCROLL_PADDING_PX = 0;
 export const IAM_DEFAULT_OVERLAY_OPACITY = 0.5;
 export const IAM_ANIMATION_ENTER_DURATION_MS = 300;
 export const IAM_MODAL_SCALE_ENTER_START = 0.9;

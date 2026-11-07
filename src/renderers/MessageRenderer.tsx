@@ -2,7 +2,7 @@
  * Message Renderer for In-App Messages (React Native)
  */
 
-import React, { useState, useEffect, type ReactNode } from 'react';
+import React, { useState, useEffect, useMemo, type ReactNode } from 'react';
 import {
   View,
   Text,
@@ -13,46 +13,104 @@ import {
   Animated,
   ScrollView,
   ImageBackground,
+  PanResponder,
 } from 'react-native';
-import { BlockRendererComponent as BlockRenderer } from './BlockRenderer';
+import { BlockRendererComponent as BlockRenderer, isSoleFullHtmlDocumentBlock } from './BlockRenderer';
 import type {
   InAppMessage,
   InAppMessageConfig,
   InAppMessageType,
+  InAppMessagePage,
   MessageContainerSettings,
 } from '../types/inAppMessage';
+import { mergeIamPageSurfaceSettings } from '../mergeIamPageSurfaceSettings';
 import {
   IAM_ANIMATION_ENTER_DURATION_MS,
-  IAM_BANNER_OUTER_PADDING_PX,
-  IAM_DEFAULT_OVERLAY_OPACITY,
-  IAM_DEFAULT_VIEWPORT_PADDING_PX,
   IAM_MODAL_SCALE_ENTER_START,
 } from '../constants/iamLayoutDefaults';
+import {
+  resolveIamBannerOuterPaddingPx,
+  resolveIamCloseButtonStyle,
+  resolveIamFullscreenContainerStyleNative,
+  resolveIamModalContainerStyleNative,
+  resolveIamNotificationContainerStyleNative,
+  IAM_NOTIFICATION_CARD_PADDING_PX,
+  resolveIamNotificationViewportPaddingPx,
+  resolveIamOverlayOpacity,
+  resolveIamScrollPaddingPx,
+  resolveIamViewportPaddingPx,
+  shouldShowIamCloseButton,
+} from '../resolveIamCanvasLayout';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
-/**
- * Match dashboard + web SDK: show close unless explicitly disabled on root or containerSettings.
- */
-function shouldShowCloseButton(config: InAppMessageConfig): boolean {
-  if (config.showCloseButton === false || config.closeButton === false) {
-    return false;
-  }
-  if (config.containerSettings?.showCloseButton === false) {
-    return false;
-  }
-  return true;
+/** Stretch modal host to overlay width so containerSettings.widthMode resolves correctly. */
+function modalShellHostStyle(soleFullHtml: boolean) {
+  if (soleFullHtml) return { flex: 1, width: '100%' as const };
+  return { alignSelf: 'stretch' as const, width: '100%' as const };
+}
+
+function IamCloseButton({
+  config,
+  onPress,
+}: {
+  config: InAppMessageConfig;
+  onPress: () => void;
+}) {
+  if (!shouldShowIamCloseButton(config)) return null;
+  const { size, color, layout } = resolveIamCloseButtonStyle(config);
+  const fontSize = Math.floor(size * 0.85);
+  return (
+    <TouchableOpacity
+      style={[styles.closeButtonBase, { width: size, height: size, ...layout }]}
+      onPress={onPress}
+    >
+      <Text style={{ fontSize, color, lineHeight: fontSize }}>×</Text>
+    </TouchableOpacity>
+  );
 }
 
 /**
- * Resolve layout type when messageType is missing or stale vs containerSettings.displayType.
+ * Resolve layout type — match dashboard preview + web SDK:
+ * `containerSettings.displayType` wins over root `messageType`.
  */
 function getEffectiveMessageType(config: InAppMessageConfig): InAppMessageType {
-  const raw = config.messageType ?? config.containerSettings?.displayType ?? 'popup';
-  if (String(raw).toLowerCase() === 'fullscreen') {
+  const raw = config.containerSettings?.displayType ?? config.messageType ?? 'modal';
+  const lower = String(raw).toLowerCase();
+  if (lower === 'fullscreen' || lower === 'full_screen') {
     return 'full_screen';
   }
   return raw as InAppMessageType;
+}
+
+/**
+ * Fade + scale enter for modal/popup. Guarantees the card is visible even if
+ * the animation fails to start (e.g. remount / useNativeDriver edge cases).
+ */
+function runModalEnterAnimation(
+  fadeAnim: Animated.Value,
+  scaleAnim: Animated.Value
+): void {
+  fadeAnim.setValue(0);
+  scaleAnim.setValue(IAM_MODAL_SCALE_ENTER_START);
+  Animated.parallel([
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: IAM_ANIMATION_ENTER_DURATION_MS,
+      useNativeDriver: true,
+    }),
+    Animated.spring(scaleAnim, {
+      toValue: 1,
+      friction: 8,
+      tension: 40,
+      useNativeDriver: true,
+    }),
+  ]).start(({ finished }) => {
+    if (!finished) {
+      fadeAnim.setValue(1);
+      scaleAnim.setValue(1);
+    }
+  });
 }
 
 export interface MessageRendererProps {
@@ -107,26 +165,6 @@ function getCurrentPageIndex(config: InAppMessageConfig, props: MessageRendererP
   return 0;
 }
 
-/** Container sizing from dashboard `containerSettings` (popup/modal). */
-function resolvePopupContainerStyle(config: InAppMessageConfig): Record<string, unknown> {
-  const cs = config.containerSettings;
-  if (!cs) return {};
-  const s: Record<string, unknown> = {};
-  if (cs.widthMode === 'full') {
-    s.width = '100%';
-    s.maxWidth = SCREEN_WIDTH;
-  } else if (cs.customWidth) {
-    s.width = cs.customWidth;
-  }
-  if (cs.padding !== undefined) s.padding = cs.padding;
-  if (cs.margin !== undefined) s.margin = cs.margin;
-  if (cs.maxWidth != null && cs.maxWidthUnit) {
-    const u = cs.maxWidthUnit;
-    s.maxWidth = u === '%' ? `${cs.maxWidth}%` : Number(cs.maxWidth);
-  }
-  return s;
-}
-
 /** Match web SDK `applyContainerStyles` background color + opacity. */
 function resolveContainerBgColor(cs?: MessageContainerSettings): string | undefined {
   if (!cs?.backgroundColor) return undefined;
@@ -151,6 +189,44 @@ function resolveContainerBorderStyle(cs?: MessageContainerSettings): Record<stri
     borderStyle:
       cs.borderStyle === 'dashed' ? 'dashed' : cs.borderStyle === 'dotted' ? 'dotted' : 'solid',
   };
+}
+
+/** Same merge as dashboard + web SDK (see packages/shared mergeIamPageSurfaceSettings). */
+function mergePageSurfaceSettings(
+  cs: MessageContainerSettings | undefined,
+  pageSettings?: InAppMessagePage['settings']
+): MessageContainerSettings {
+  return mergeIamPageSurfaceSettings(cs ?? undefined, pageSettings ?? undefined) as MessageContainerSettings;
+}
+
+function useIamPageSwipePanResponder(
+  messageId: string,
+  config: InAppMessageConfig,
+  pageIndex: number,
+  onNavigatePage?: (id: string, idx: number) => void
+) {
+  return useMemo(() => {
+    const n = config.pages?.length ?? 0;
+    if (n <= 1 || !onNavigatePage) {
+      return PanResponder.create({
+        onStartShouldSetPanResponder: () => false,
+      });
+    }
+    const last = n - 1;
+    return PanResponder.create({
+      onMoveShouldSetPanResponder: (_e, g) =>
+        Math.abs(g.dx) > 12 && Math.abs(g.dx) > Math.abs(g.dy) * 1.2,
+      onPanResponderTerminationRequest: () => true,
+      onPanResponderRelease: (_e, g) => {
+        if (Math.abs(g.dx) < 48) return;
+        if (g.dx < 0 && pageIndex < last) {
+          onNavigatePage(messageId, pageIndex + 1);
+        } else if (g.dx > 0 && pageIndex > 0) {
+          onNavigatePage(messageId, pageIndex - 1);
+        }
+      },
+    });
+  }, [messageId, config.pages, pageIndex, onNavigatePage]);
 }
 
 /** Split row blocks with pin top/bottom out of the scroll column (dashboard preview uses absolute pin). */
@@ -218,6 +294,17 @@ interface PartitionedScrollBodyProps {
   scrollStyle: any;
   onButtonClick?: MessageRendererProps['onButtonClick'];
   onFormSubmit?: MessageRendererProps['onFormSubmit'];
+  /**
+   * When true (or when the page is a sole full HTML document), skip ScrollView
+   * and fill the parent edge-to-edge — matches dashboard mockup fullscreen HTML.
+   */
+  edgeToEdgeHtml?: boolean;
+  /**
+   * Toast/modal cards size to their blocks (preview parity). Avoids flex:1 collapse
+   * when the parent has no explicit height.
+   */
+  contentSized?: boolean;
+  maxScrollHeight?: number;
 }
 
 function PartitionedScrollBody({
@@ -226,6 +313,9 @@ function PartitionedScrollBody({
   scrollStyle,
   onButtonClick,
   onFormSubmit,
+  edgeToEdgeHtml = false,
+  contentSized = false,
+  maxScrollHeight,
 }: PartitionedScrollBodyProps) {
   const { flow, pinnedTop, pinnedBottom } = partitionBlocksByRowPin(blocks);
   const [topInset, setTopInset] = useState(0);
@@ -234,8 +324,36 @@ function PartitionedScrollBody({
   const topEdgePx = pinnedEdgeInsetPx(pinnedTop, 'top');
   const bottomEdgePx = pinnedEdgeInsetPx(pinnedBottom, 'bottom');
 
+  // Mirror HtmlBlockRenderer.vue: a lone full HTML document fills the device
+  // screen — no padded ScrollView wrapping a content-sized WebView.
+  const soleFullHtml =
+    edgeToEdgeHtml ||
+    (pinnedTop.length === 0 &&
+      pinnedBottom.length === 0 &&
+      isSoleFullHtmlDocumentBlock(flow));
+
+  if (soleFullHtml && flow.length === 1) {
+    return (
+      <View style={{ flex: 1, width: '100%', minHeight: SCREEN_HEIGHT }}>
+        <BlockRenderer key={flow[0].id} block={flow[0]} htmlFillViewport {...h} />
+      </View>
+    );
+  }
+
+  const shellStyle = contentSized
+    ? { position: 'relative' as const, width: '100%' as const }
+    : { position: 'relative' as const, flex: 1, minHeight: 80 };
+
+  const scrollViewStyle = contentSized
+    ? [
+        { width: '100%' as const },
+        maxScrollHeight != null ? { maxHeight: maxScrollHeight } : null,
+        scrollStyle,
+      ]
+    : scrollStyle;
+
   return (
-    <View style={{ position: 'relative', flex: 1, minHeight: 80 }}>
+    <View style={shellStyle}>
       {pinnedTop.length > 0 && (
         <View
           style={pinnedStackOuterStyle(pinnedTop, 'top')}
@@ -252,10 +370,12 @@ function PartitionedScrollBody({
         </View>
       )}
       <ScrollView
-        style={scrollStyle}
+        style={scrollViewStyle}
+        nestedScrollEnabled
         contentContainerStyle={{
           paddingTop: topInset + topEdgePx,
           paddingBottom: bottomInset + bottomEdgePx,
+          ...(contentSized ? { flexGrow: 0 } : null),
         }}
       >
         {flow.map((block) => (
@@ -285,42 +405,64 @@ interface ModalCardSurfaceProps {
   config: InAppMessageConfig;
   fadeAnim: Animated.Value;
   scaleAnim: Animated.Value;
-  /** e.g. styles.popupContainer vs styles.modalContainer */
-  containerStyle: object;
   children: ReactNode;
+  pageIndex?: number;
+  /** Sole full-HTML page: edge-to-edge like the dashboard device mockup. */
+  edgeToEdge?: boolean;
 }
 
-/** Dashboard `containerSettings.backgroundImage` + colors/borders (web `applyContainerStyles`). */
-function ModalCardSurface({ config, fadeAnim, scaleAnim, containerStyle, children }: ModalCardSurfaceProps) {
+/** Dashboard preview container surface — config-driven, no hardcoded shell sizing. */
+function ModalCardSurface({
+  config,
+  fadeAnim,
+  scaleAnim,
+  children,
+  pageIndex = 0,
+  edgeToEdge = false,
+}: ModalCardSurfaceProps) {
   const cs = config.containerSettings;
+  const merged = mergePageSurfaceSettings(cs, config.pages?.[pageIndex]?.settings);
   const useBg =
-    !!String(cs?.backgroundImage || '').trim() && cs?.backgroundImageEnabled !== false;
-  const solidBg = resolveContainerBgColor(cs) ?? '#FFFFFF';
-  const border = resolveContainerBorderStyle(cs);
-  const br = cs?.borderRadius ?? 8;
+    !!String(merged?.backgroundImage || '').trim() && merged?.backgroundImageEnabled !== false;
+  const resolved = resolveIamModalContainerStyleNative(config, pageIndex, SCREEN_WIDTH);
+  const solidBg = (resolved.backgroundColor as string) ?? resolveContainerBgColor(merged) ?? '#FFFFFF';
+  const border = edgeToEdge ? {} : resolveContainerBorderStyle(cs);
+  const br = edgeToEdge ? 0 : (resolved.borderRadius as number);
 
   const animatedCard = [
-    containerStyle,
+    edgeToEdge ? null : resolved,
     {
       opacity: fadeAnim,
       transform: [{ scale: scaleAnim }],
       borderRadius: br,
       overflow: 'hidden' as const,
-      ...resolvePopupContainerStyle(config),
+      flexDirection: 'column' as const,
+      maxHeight: edgeToEdge ? SCREEN_HEIGHT : SCREEN_HEIGHT * 0.9,
       ...border,
     },
+    edgeToEdge
+      ? {
+          flex: 1,
+          width: '100%' as const,
+          height: SCREEN_HEIGHT,
+          maxWidth: SCREEN_WIDTH,
+          maxHeight: SCREEN_HEIGHT,
+          padding: 0,
+          margin: 0,
+        }
+      : null,
   ];
 
   if (useBg) {
     return (
       <Animated.View style={[animatedCard, { backgroundColor: 'transparent' }]}>
         <ImageBackground
-          source={{ uri: cs!.backgroundImage! }}
-          style={{ width: '100%' }}
+          source={{ uri: merged.backgroundImage! }}
+          style={{ width: '100%', ...(edgeToEdge ? { flex: 1, height: '100%' } : {}) }}
           resizeMode="cover"
           imageStyle={{ borderRadius: br }}
         >
-          <View style={{ flexGrow: 1 }}>{children}</View>
+          <View style={{ flexGrow: 1, flex: edgeToEdge ? 1 : undefined }}>{children}</View>
         </ImageBackground>
       </Animated.View>
     );
@@ -334,16 +476,26 @@ function ModalCardSurface({ config, fadeAnim, scaleAnim, containerStyle, childre
 /**
  * Banner Renderer Component
  */
-export function BannerRenderer({ message, onDismiss, onButtonClick, onFormSubmit }: MessageRendererProps) {
+export function BannerRenderer({
+  message,
+  onDismiss,
+  onButtonClick,
+  onFormSubmit,
+  onNavigatePage,
+  currentPageIndex,
+}: MessageRendererProps) {
   const config = message.config;
   const position = config.position || 'top';
-  const blocks = getBlocks(config);
+  const pageIndex = currentPageIndex !== undefined ? currentPageIndex : 0;
+  const blocks = getBlocks(config, pageIndex);
   const { flow, pinnedTop, pinnedBottom } = partitionBlocksByRowPin(blocks);
   const cs = config.containerSettings;
+  const merged = mergePageSurfaceSettings(cs, config.pages?.[pageIndex]?.settings);
   const useBg =
-    !!String(cs?.backgroundImage || '').trim() && cs?.backgroundImageEnabled !== false;
-  const solidBg = resolveContainerBgColor(cs) ?? config.backgroundColor ?? '#FFFFFF';
+    !!String(merged?.backgroundImage || '').trim() && merged?.backgroundImageEnabled !== false;
+  const solidBg = resolveContainerBgColor(merged) ?? config.backgroundColor ?? '#FFFFFF';
   const [fadeAnim] = useState(new Animated.Value(0));
+  const pan = useIamPageSwipePanResponder(message._id, config, pageIndex, onNavigatePage);
 
   useEffect(() => {
     Animated.timing(fadeAnim, {
@@ -351,7 +503,7 @@ export function BannerRenderer({ message, onDismiss, onButtonClick, onFormSubmit
       duration: IAM_ANIMATION_ENTER_DURATION_MS,
       useNativeDriver: true,
     }).start();
-  }, []);
+  }, [pageIndex]);
 
   const containerStyle: any = {
     position: 'absolute',
@@ -359,7 +511,7 @@ export function BannerRenderer({ message, onDismiss, onButtonClick, onFormSubmit
     right: 0,
     width: '100%',
     zIndex: 9999,
-    padding: IAM_BANNER_OUTER_PADDING_PX,
+    padding: resolveIamBannerOuterPaddingPx(),
     borderBottomWidth: position === 'top' ? 1 : 0,
     borderTopWidth: position === 'bottom' ? 1 : 0,
     borderColor: '#E0E0E0',
@@ -413,14 +565,54 @@ export function BannerRenderer({ message, onDismiss, onButtonClick, onFormSubmit
           ))}
         </View>
       )}
+      {config.pages && config.pages.length > 1 && config.showNavigationButtons !== false && (
+        <View style={styles.bannerPageNavigation}>
+          <TouchableOpacity
+            style={[styles.navButton, pageIndex === 0 && styles.navButtonDisabled]}
+            disabled={pageIndex === 0}
+            onPress={() => {
+              if (pageIndex > 0 && onNavigatePage) {
+                onNavigatePage(message._id, pageIndex - 1);
+              }
+            }}
+          >
+            <Text style={[styles.navButtonText, pageIndex === 0 && styles.navButtonTextDisabled]}>← Previous</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[
+              styles.navButton,
+              pageIndex >= (config.pages?.length ?? 1) - 1 && styles.navButtonDisabled,
+            ]}
+            disabled={pageIndex >= (config.pages?.length ?? 1) - 1}
+            onPress={() => {
+              const last = (config.pages?.length ?? 1) - 1;
+              if (pageIndex < last && onNavigatePage) {
+                onNavigatePage(message._id, pageIndex + 1);
+              }
+            }}
+          >
+            <Text
+              style={[
+                styles.navButtonText,
+                pageIndex >= (config.pages?.length ?? 1) - 1 && styles.navButtonTextDisabled,
+              ]}
+            >
+              Next →
+            </Text>
+          </TouchableOpacity>
+        </View>
+      )}
     </>
   );
 
   if (useBg) {
     return (
-      <Animated.View style={[containerStyle, { opacity: fadeAnim, backgroundColor: 'transparent' }]}>
+      <Animated.View
+        {...pan.panHandlers}
+        style={[containerStyle, { opacity: fadeAnim, backgroundColor: 'transparent' }]}
+      >
         <ImageBackground
-          source={{ uri: cs!.backgroundImage! }}
+          source={{ uri: merged.backgroundImage! }}
           style={{ width: '100%' }}
           resizeMode="cover"
         >
@@ -431,7 +623,7 @@ export function BannerRenderer({ message, onDismiss, onButtonClick, onFormSubmit
   }
 
   return (
-    <Animated.View style={[containerStyle, { opacity: fadeAnim, backgroundColor: solidBg }]}>
+    <Animated.View {...pan.panHandlers} style={[containerStyle, { opacity: fadeAnim, backgroundColor: solidBg }]}>
       {inner}
     </Animated.View>
   );
@@ -444,25 +636,14 @@ export function PopupRenderer({ message, onDismiss, onButtonClick, onFormSubmit,
   const config = message.config;
   const pageIndex = currentPageIndex !== undefined ? currentPageIndex : 0;
   const blocks = getBlocks(config, pageIndex);
+  const soleFullHtml = isSoleFullHtmlDocumentBlock(blocks);
   const overlay = config.overlay !== false;
-  const overlayOpacity = config.overlayOpacity ?? IAM_DEFAULT_OVERLAY_OPACITY;
+  const overlayOpacity = resolveIamOverlayOpacity(config);
   const [fadeAnim] = useState(new Animated.Value(0));
   const [scaleAnim] = useState(new Animated.Value(IAM_MODAL_SCALE_ENTER_START));
 
   useEffect(() => {
-    Animated.parallel([
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: IAM_ANIMATION_ENTER_DURATION_MS,
-        useNativeDriver: true,
-      }),
-      Animated.spring(scaleAnim, {
-        toValue: 1,
-        friction: 8,
-        tension: 40,
-        useNativeDriver: true,
-      }),
-    ]).start();
+    runModalEnterAnimation(fadeAnim, scaleAnim);
   }, [pageIndex]); // Re-animate on page change
 
   const handleOverlayPress = () => {
@@ -471,8 +652,10 @@ export function PopupRenderer({ message, onDismiss, onButtonClick, onFormSubmit,
     }
   };
 
-  const viewportPad =
-    config.containerSettings?.viewportPadding ?? IAM_DEFAULT_VIEWPORT_PADDING_PX;
+  const viewportPad = soleFullHtml ? 0 : resolveIamViewportPaddingPx(config);
+  const scrollPad = resolveIamScrollPaddingPx();
+
+  const pan = useIamPageSwipePanResponder(message._id, config, pageIndex, onNavigatePage);
 
   return (
     <Modal
@@ -491,35 +674,39 @@ export function PopupRenderer({ message, onDismiss, onButtonClick, onFormSubmit,
           styles.overlay,
           { backgroundColor: overlay ? `rgba(0, 0, 0, ${overlayOpacity})` : 'transparent' },
           { padding: viewportPad },
+          soleFullHtml ? { padding: 0 } : null,
         ]}
         onPress={handleOverlayPress}
       >
-        <TouchableOpacity activeOpacity={1} onPress={(e) => e.stopPropagation()}>
+        <TouchableOpacity
+          activeOpacity={1}
+          onPress={(e) => e.stopPropagation()}
+          style={modalShellHostStyle(soleFullHtml)}
+        >
+          <View
+            {...pan.panHandlers}
+            collapsable={false}
+            style={modalShellHostStyle(soleFullHtml)}
+          >
           <ModalCardSurface
             config={config}
+            pageIndex={pageIndex}
             fadeAnim={fadeAnim}
             scaleAnim={scaleAnim}
-            containerStyle={[
-              styles.popupContainer,
-              { maxWidth: SCREEN_WIDTH * 0.9 },
-            ]}
+            edgeToEdge={soleFullHtml}
           >
-            {shouldShowCloseButton(config) && (
-              <TouchableOpacity
-                style={styles.closeButton}
-                onPress={() => onDismiss(message._id)}
-              >
-                <Text style={styles.closeButtonText}>×</Text>
-              </TouchableOpacity>
-            )}
+            <IamCloseButton config={config} onPress={() => onDismiss(message._id)} />
             <PartitionedScrollBody
               blocks={blocks}
               message={message}
-              scrollStyle={styles.popupContent}
+              contentSized={!soleFullHtml}
+              maxScrollHeight={soleFullHtml ? undefined : SCREEN_HEIGHT * 0.72}
+              scrollStyle={soleFullHtml ? { flex: 1, padding: 0 } : { padding: scrollPad }}
               onButtonClick={onButtonClick}
               onFormSubmit={onFormSubmit}
+              edgeToEdgeHtml={soleFullHtml}
             />
-            {config.pages && config.pages.length > 1 && config.showNavigationButtons !== false && (() => {
+            {!soleFullHtml && config.pages && config.pages.length > 1 && config.showNavigationButtons !== false && (() => {
               const pagesLength = config.pages.length;
               const lastPageIndex = pagesLength - 1;
               return (
@@ -550,6 +737,7 @@ export function PopupRenderer({ message, onDismiss, onButtonClick, onFormSubmit,
               );
             })()}
           </ModalCardSurface>
+          </View>
         </TouchableOpacity>
       </TouchableOpacity>
     </Modal>
@@ -563,26 +751,15 @@ export function ModalRenderer({ message, onDismiss, onButtonClick, onFormSubmit,
   const config = message.config;
   const pageIndex = currentPageIndex !== undefined ? currentPageIndex : 0;
   const blocks = getBlocks(config, pageIndex);
+  const soleFullHtml = isSoleFullHtmlDocumentBlock(blocks);
   const overlay = config.overlay !== false;
-  const overlayOpacity = config.overlayOpacity ?? IAM_DEFAULT_OVERLAY_OPACITY;
+  const overlayOpacity = resolveIamOverlayOpacity(config);
   const [fadeAnim] = useState(new Animated.Value(0));
   const [scaleAnim] = useState(new Animated.Value(IAM_MODAL_SCALE_ENTER_START));
 
   useEffect(() => {
-    Animated.parallel([
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: IAM_ANIMATION_ENTER_DURATION_MS,
-        useNativeDriver: true,
-      }),
-      Animated.spring(scaleAnim, {
-        toValue: 1,
-        friction: 8,
-        tension: 40,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, []);
+    runModalEnterAnimation(fadeAnim, scaleAnim);
+  }, [pageIndex]);
 
   const handleOverlayPress = () => {
     if (config.dismissible !== false) {
@@ -590,8 +767,10 @@ export function ModalRenderer({ message, onDismiss, onButtonClick, onFormSubmit,
     }
   };
 
-  const viewportPad =
-    config.containerSettings?.viewportPadding ?? IAM_DEFAULT_VIEWPORT_PADDING_PX;
+  const viewportPad = soleFullHtml ? 0 : resolveIamViewportPaddingPx(config);
+  const scrollPad = resolveIamScrollPaddingPx();
+
+  const pan = useIamPageSwipePanResponder(message._id, config, pageIndex, onNavigatePage);
 
   return (
     <Modal
@@ -613,32 +792,35 @@ export function ModalRenderer({ message, onDismiss, onButtonClick, onFormSubmit,
         ]}
         onPress={handleOverlayPress}
       >
-        <TouchableOpacity activeOpacity={1} onPress={(e) => e.stopPropagation()}>
+        <TouchableOpacity
+          activeOpacity={1}
+          onPress={(e) => e.stopPropagation()}
+          style={modalShellHostStyle(soleFullHtml)}
+        >
+          <View
+            {...pan.panHandlers}
+            collapsable={false}
+            style={modalShellHostStyle(soleFullHtml)}
+          >
           <ModalCardSurface
             config={config}
+            pageIndex={pageIndex}
             fadeAnim={fadeAnim}
             scaleAnim={scaleAnim}
-            containerStyle={[
-              styles.modalContainer,
-              { maxWidth: SCREEN_WIDTH * 0.85, maxHeight: SCREEN_HEIGHT * 0.8 },
-            ]}
+            edgeToEdge={soleFullHtml}
           >
-            {shouldShowCloseButton(config) && (
-              <TouchableOpacity
-                style={styles.closeButton}
-                onPress={() => onDismiss(message._id)}
-              >
-                <Text style={styles.closeButtonText}>×</Text>
-              </TouchableOpacity>
-            )}
+            <IamCloseButton config={config} onPress={() => onDismiss(message._id)} />
             <PartitionedScrollBody
               blocks={blocks}
               message={message}
-              scrollStyle={styles.modalContent}
+              contentSized={!soleFullHtml}
+              maxScrollHeight={soleFullHtml ? undefined : SCREEN_HEIGHT * 0.72}
+              scrollStyle={soleFullHtml ? { flex: 1, padding: 0 } : { padding: scrollPad }}
               onButtonClick={onButtonClick}
               onFormSubmit={onFormSubmit}
+              edgeToEdgeHtml={soleFullHtml}
             />
-            {config.pages && config.pages.length > 1 && config.showNavigationButtons !== false && (() => {
+            {!soleFullHtml && config.pages && config.pages.length > 1 && config.showNavigationButtons !== false && (() => {
               const pagesLength = config.pages.length;
               const lastPageIndex = pagesLength - 1;
               return (
@@ -669,6 +851,7 @@ export function ModalRenderer({ message, onDismiss, onButtonClick, onFormSubmit,
               );
             })()}
           </ModalCardSurface>
+          </View>
         </TouchableOpacity>
       </TouchableOpacity>
     </Modal>
@@ -682,23 +865,27 @@ export function FullScreenRenderer({ message, onDismiss, onButtonClick, onFormSu
   const config = message.config;
   const pageIndex = currentPageIndex !== undefined ? currentPageIndex : 0;
   const blocks = getBlocks(config, pageIndex);
+  const soleFullHtml = isSoleFullHtmlDocumentBlock(blocks);
   const cs = config.containerSettings;
+  const merged = mergePageSurfaceSettings(cs, config.pages?.[pageIndex]?.settings);
   const useBg =
-    !!String(cs?.backgroundImage || '').trim() && cs?.backgroundImageEnabled !== false;
-  const solidBg = resolveContainerBgColor(cs) ?? '#FFFFFF';
+    !!String(merged?.backgroundImage || '').trim() && merged?.backgroundImageEnabled !== false;
+  const shellStyle = resolveIamFullscreenContainerStyleNative(config, pageIndex);
+  const scrollPad = resolveIamScrollPaddingPx();
+  const pan = useIamPageSwipePanResponder(message._id, config, pageIndex, onNavigatePage);
 
   const inner = (
-    <View style={[styles.fullScreenContainer, useBg ? { backgroundColor: 'transparent' } : { backgroundColor: solidBg }]}>
-      {shouldShowCloseButton(config) && (
-        <TouchableOpacity
-          style={styles.fullScreenCloseButton}
-          onPress={() => onDismiss(message._id)}
-        >
-          <Text style={styles.fullScreenCloseButtonText}>×</Text>
-        </TouchableOpacity>
-      )}
+    <View
+      {...pan.panHandlers}
+      style={[
+        styles.fullScreenContainer,
+        shellStyle,
+        useBg ? { backgroundColor: 'transparent' } : null,
+      ]}
+    >
+      <IamCloseButton config={config} onPress={() => onDismiss(message._id)} />
 
-      {config.pages && config.pages.length > 1 && config.showNavigationButtons !== false && (() => {
+      {!soleFullHtml && config.pages && config.pages.length > 1 && config.showNavigationButtons !== false && (() => {
         const pagesLength = config.pages.length;
         const lastPageIndex = pagesLength - 1;
         return (
@@ -732,9 +919,12 @@ export function FullScreenRenderer({ message, onDismiss, onButtonClick, onFormSu
       <PartitionedScrollBody
         blocks={blocks}
         message={message}
-        scrollStyle={[styles.fullScreenContent, { flex: 1 }]}
+        scrollStyle={
+          soleFullHtml ? { flex: 1, padding: 0 } : { flex: 1, padding: scrollPad }
+        }
         onButtonClick={onButtonClick}
         onFormSubmit={onFormSubmit}
+        edgeToEdgeHtml={soleFullHtml}
       />
     </View>
   );
@@ -752,7 +942,7 @@ export function FullScreenRenderer({ message, onDismiss, onButtonClick, onFormSu
     >
       {useBg ? (
         <ImageBackground
-          source={{ uri: cs!.backgroundImage! }}
+          source={{ uri: merged.backgroundImage! }}
           style={{ flex: 1, width: '100%', minHeight: SCREEN_HEIGHT }}
           resizeMode="cover"
         >
@@ -766,17 +956,44 @@ export function FullScreenRenderer({ message, onDismiss, onButtonClick, onFormSu
 }
 
 /**
- * Notification Renderer Component
+ * Notification Renderer — toast-style at screen edge (matches dashboard preview + web SDK).
+ * Uses a transparent Modal so the toast overlays the full screen even when MessageRenderer
+ * is mounted inside a nested/clipped View.
  */
-export function NotificationRenderer({ message, onDismiss, onButtonClick, onFormSubmit }: MessageRendererProps) {
+export function NotificationRenderer({
+  message,
+  onDismiss,
+  onButtonClick,
+  onFormSubmit,
+  onNavigatePage,
+  currentPageIndex,
+}: MessageRendererProps) {
   const config = message.config;
-  const blocks = getBlocks(config);
-  const position = config.notificationPosition || 'top';
-  const animationDirection = config.notificationAnimation || 'down';
+  const pageIndex = currentPageIndex !== undefined ? currentPageIndex : 0;
+  const blocks = getBlocks(config, pageIndex);
+  const cs = config.containerSettings;
+  const position =
+    (cs?.notificationPosition || config.notificationPosition || 'top') as
+      | 'top'
+      | 'bottom'
+      | 'left'
+      | 'right';
+  const animationDirection =
+    (cs?.notificationAnimation || config.notificationAnimation || 'down') as
+      | 'up'
+      | 'down'
+      | 'left'
+      | 'right';
   const [slideAnim] = useState(new Animated.Value(0));
+  const cardStyle = resolveIamNotificationContainerStyleNative(
+    config,
+    pageIndex,
+    SCREEN_WIDTH,
+    SCREEN_HEIGHT
+  );
+  const edgePad = resolveIamNotificationViewportPaddingPx();
 
   useEffect(() => {
-    // Initial position based on animation direction
     let initialValue = 0;
     if (animationDirection === 'up') initialValue = SCREEN_HEIGHT;
     else if (animationDirection === 'down') initialValue = -SCREEN_HEIGHT;
@@ -790,87 +1007,112 @@ export function NotificationRenderer({ message, onDismiss, onButtonClick, onForm
       friction: 8,
       tension: 40,
       useNativeDriver: true,
-    }).start();
-  }, []);
+    }).start(({ finished }) => {
+      if (!finished) slideAnim.setValue(0);
+    });
+  }, [pageIndex]);
 
-  // Find image and text blocks
-  const imageBlock = blocks.find(b => b.type === 'image');
-  const textBlocks = blocks.filter(b => b.type === 'text' || b.type === 'html');
+  const isHorizontal = position === 'left' || position === 'right';
+  const rootAlign: any = {
+    flex: 1,
+    padding: edgePad,
+    justifyContent:
+      position === 'top'
+        ? 'flex-start'
+        : position === 'bottom'
+          ? 'flex-end'
+          : 'center',
+    alignItems:
+      position === 'left'
+        ? 'flex-start'
+        : position === 'right'
+          ? 'flex-end'
+          : 'center',
+  };
 
-  const containerStyle: any = {
-    position: 'absolute',
-    left: position === 'left' ? 0 : position === 'right' ? undefined : SCREEN_WIDTH / 2 - 200,
-    right: position === 'right' ? 0 : undefined,
-    width: position === 'left' || position === 'right' ? '80%' : '90%',
-    maxWidth: 400,
-    zIndex: 9999,
-    backgroundColor: config.backgroundColor || '#FFFFFF',
-    padding: 16,
-    borderRadius: 8,
+  const cardPad = typeof cardStyle.padding === 'number' ? cardStyle.padding : IAM_NOTIFICATION_CARD_PADDING_PX;
+  const notificationCardStyle: any = {
+    ...cardStyle,
+    width: isHorizontal ? '80%' : cardStyle.width,
+    flexDirection: 'column' as const,
+    overflow: 'hidden' as const,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 5,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
   };
 
-  const transform: any[] = [];
-  if (position === 'top' || position === 'bottom') {
-    containerStyle[position] = position === 'top' ? 20 : undefined;
-    if (position === 'bottom') {
-      containerStyle.bottom = 20;
-    }
-    transform.push({ translateX: -200 }); // Center horizontally
-    if (animationDirection === 'up' || animationDirection === 'down') {
-      transform.push({ translateY: slideAnim });
-    }
-  } else {
-    containerStyle[position] = 20;
-    transform.push({ translateY: -100 }); // Center vertically
-    if (animationDirection === 'left' || animationDirection === 'right') {
-      transform.push({ translateX: slideAnim });
-    }
-  }
+  const slideTransform =
+    animationDirection === 'left' || animationDirection === 'right'
+      ? [{ translateX: slideAnim }]
+      : [{ translateY: slideAnim }];
 
   return (
-    <Animated.View style={[containerStyle, { transform }]}>
-      {imageBlock && (
-        <View style={{ flexShrink: 0 }}>
-          <BlockRenderer block={imageBlock} {...blockHandlers(message, onButtonClick, onFormSubmit)} />
-        </View>
-      )}
-      <View style={{ flex: 1 }}>
-        {textBlocks.map((block) => (
-          <BlockRenderer
-            key={block.id}
-            block={block}
-            {...blockHandlers(message, onButtonClick, onFormSubmit)}
+    <Modal
+      transparent
+      visible
+      animationType="none"
+      onRequestClose={() => {
+        if (config.dismissible !== false) {
+          onDismiss(message._id);
+        }
+      }}
+    >
+      <View style={rootAlign} pointerEvents="box-none">
+        <Animated.View style={[notificationCardStyle, { transform: slideTransform }]}>
+          <IamCloseButton config={config} onPress={() => onDismiss(message._id)} />
+          <PartitionedScrollBody
+            blocks={blocks}
+            message={message}
+            contentSized
+            maxScrollHeight={SCREEN_HEIGHT * 0.72 - cardPad * 2}
+            scrollStyle={{ padding: resolveIamScrollPaddingPx() }}
+            onButtonClick={onButtonClick}
+            onFormSubmit={onFormSubmit}
           />
-        ))}
+          {config.pages && config.pages.length > 1 && config.showNavigationButtons !== false && (() => {
+            const pagesLength = config.pages.length;
+            const lastPageIndex = pagesLength - 1;
+            return (
+              <View style={styles.modalNavigation}>
+                <TouchableOpacity
+                  style={[styles.navButton, pageIndex === 0 && styles.navButtonDisabled]}
+                  disabled={pageIndex === 0}
+                  onPress={() => {
+                    if (pageIndex > 0 && onNavigatePage) {
+                      onNavigatePage(message._id, pageIndex - 1);
+                    }
+                  }}
+                >
+                  <Text style={[styles.navButtonText, pageIndex === 0 && styles.navButtonTextDisabled]}>
+                    ← Previous
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.navButton, pageIndex >= lastPageIndex && styles.navButtonDisabled]}
+                  disabled={pageIndex >= lastPageIndex}
+                  onPress={() => {
+                    if (pageIndex < lastPageIndex && onNavigatePage) {
+                      onNavigatePage(message._id, pageIndex + 1);
+                    }
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.navButtonText,
+                      pageIndex >= lastPageIndex && styles.navButtonTextDisabled,
+                    ]}
+                  >
+                    Next →
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            );
+          })()}
+        </Animated.View>
       </View>
-      {!imageBlock && textBlocks.length === 0 && blocks.length > 0 && (
-        <View style={{ flex: 1 }}>
-          {blocks.map((block) => (
-            <BlockRenderer
-              key={block.id}
-              block={block}
-              {...blockHandlers(message, onButtonClick, onFormSubmit)}
-            />
-          ))}
-        </View>
-      )}
-      {shouldShowCloseButton(config) && (
-        <TouchableOpacity
-          style={styles.notificationCloseButton}
-          onPress={() => onDismiss(message._id)}
-        >
-          <Text style={styles.notificationCloseButtonText}>×</Text>
-        </TouchableOpacity>
-      )}
-    </Animated.View>
+    </Modal>
   );
 }
 
@@ -897,6 +1139,8 @@ export function MessageRenderer({
           onDismiss={onDismiss}
           onButtonClick={onButtonClick}
           onFormSubmit={onFormSubmit}
+          onNavigatePage={onNavigatePage}
+          currentPageIndex={currentPageIndex}
         />
       );
     case 'popup':
@@ -939,6 +1183,8 @@ export function MessageRenderer({
           onDismiss={onDismiss}
           onButtonClick={onButtonClick}
           onFormSubmit={onFormSubmit}
+          onNavigatePage={onNavigatePage}
+          currentPageIndex={currentPageIndex}
         />
       );
     default:
@@ -978,61 +1224,17 @@ const styles = StyleSheet.create({
     color: '#666',
     lineHeight: 24,
   },
-  popupContainer: {
-    padding: 20,
-    width: '90%',
-    maxWidth: 500,
-  },
-  popupContent: {
-    marginTop: 8,
-  },
-  modalContainer: {
-    padding: 24,
-    width: '85%',
-    maxWidth: 600,
-  },
-  modalContent: {
-    marginTop: 8,
-  },
-  closeButton: {
+  closeButtonBase: {
     position: 'absolute',
-    top: 8,
-    right: 8,
-    width: 32,
-    height: 32,
     justifyContent: 'center',
     alignItems: 'center',
     zIndex: 10,
-  },
-  closeButtonText: {
-    fontSize: 28,
-    color: '#666',
-    lineHeight: 28,
   },
   fullScreenContainer: {
     flex: 1,
     width: '100%',
     height: '100%',
     backgroundColor: '#FFFFFF',
-  },
-  fullScreenCloseButton: {
-    position: 'absolute',
-    top: 16,
-    right: 16,
-    width: 40,
-    height: 40,
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 10,
-  },
-  fullScreenCloseButtonText: {
-    fontSize: 32,
-    color: '#666',
-    lineHeight: 32,
-  },
-  fullScreenContent: {
-    flex: 1,
-    padding: 32,
   },
   fullScreenNavigation: {
     position: 'absolute',
@@ -1042,6 +1244,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 10,
     zIndex: 10,
+  },
+  bannerPageNavigation: {
+    width: '100%',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 10,
+    marginTop: 8,
   },
   navButton: {
     paddingHorizontal: 16,
@@ -1060,18 +1269,6 @@ const styles = StyleSheet.create({
   },
   navButtonTextDisabled: {
     color: '#666666',
-  },
-  notificationCloseButton: {
-    width: 24,
-    height: 24,
-    justifyContent: 'center',
-    alignItems: 'center',
-    flexShrink: 0,
-  },
-  notificationCloseButtonText: {
-    fontSize: 20,
-    color: '#666',
-    lineHeight: 20,
   },
   modalNavigation: {
     flexDirection: 'row',

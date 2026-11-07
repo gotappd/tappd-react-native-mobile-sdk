@@ -2,6 +2,9 @@
  * In-app message types — aligned with dashboard and `@tappd/web-sdk` (duplicate for RN package independence).
  */
 
+import type { CountdownSettings } from '../iamCountdown';
+import type { ImageShape } from '../iamImageShape';
+
 export type InAppMessageType =
   | 'banner'
   | 'popup'
@@ -18,7 +21,7 @@ export type NotificationAnimationDirection = 'up' | 'down' | 'left' | 'right';
 
 export type Alignment = 'left' | 'center' | 'right' | 'full' | 'justify';
 
-export type BlockType = 'image' | 'text' | 'button' | 'html' | 'row' | 'form' | 'input';
+export type BlockType = 'image' | 'text' | 'button' | 'html' | 'row' | 'form' | 'input' | 'spacer' | 'countdown';
 
 export interface SpacingConfig {
   padding?: number;
@@ -36,9 +39,15 @@ export interface SpacingConfig {
 export interface ImageBlockConfig extends SpacingConfig {
   url: string;
   alt?: string;
+  /** Opens in the browser on tap. Doesn't count as a click on the message. */
+  link?: string;
   width?: string;
   height?: string;
   alignment?: Alignment;
+  /** Corner style; unset keeps square corners. */
+  shape?: ImageShape;
+  borderWidth?: number;
+  borderColor?: string;
 }
 
 export interface TextBlockConfig extends SpacingConfig {
@@ -64,6 +73,8 @@ export interface ButtonBlockConfig extends SpacingConfig {
   link?: string;
   textColor?: string;
   backgroundColor?: string;
+  /** CSS width (e.g. 'auto', '200px', '100%'). 'auto' is treated as unset in RN. */
+  width?: string;
   linkBehavior?: 'deeplink' | 'in_app' | 'browser';
   alignment?: Alignment;
   action?: ButtonAction;
@@ -71,6 +82,25 @@ export interface ButtonBlockConfig extends SpacingConfig {
 
 export interface HtmlBlockConfig extends SpacingConfig {
   content: string;
+}
+
+export interface SpacerBlockConfig extends SpacingConfig {
+  height?: number;
+  backgroundColor?: string;
+  showDivider?: boolean;
+}
+
+export interface CountdownBlockConfig extends SpacingConfig, CountdownSettings {
+  variant?: 'boxes' | 'plain';
+  size?: 'sm' | 'md' | 'lg';
+  alignment?: 'left' | 'center' | 'right';
+  showLabels?: boolean;
+  digitColor?: string;
+  labelColor?: string;
+  boxColor?: string;
+  /** What shows at zero: a message (default), the timer at zero, or nothing. */
+  expiredBehavior?: 'text' | 'zero' | 'hide';
+  expiredText?: string;
 }
 
 export interface RowBlockConfig {
@@ -95,9 +125,20 @@ export interface RowBlockConfig {
   gap?: number;
 }
 
-export type InputType = 'text' | 'email' | 'tel' | 'number' | 'date' | 'textarea' | 'select';
+export type InputType =
+  | 'text'
+  | 'email'
+  | 'tel'
+  | 'number'
+  | 'date'
+  | 'textarea'
+  | 'select'
+  | 'radio'
+  | 'checkbox'
+  | 'checkbox_group'
+  | 'multiselect';
 
-export interface InputField {
+export interface InputField extends SpacingConfig {
   id: string;
   label: string;
   name: string;
@@ -106,6 +147,7 @@ export interface InputField {
   required?: boolean;
   defaultValue?: string;
   options?: string[];
+  pii?: boolean;
   validation?: {
     min?: number;
     max?: number;
@@ -113,16 +155,24 @@ export interface InputField {
   };
 }
 
-export interface FormBlockConfig {
+export interface FormBlockConfig extends SpacingConfig {
   fields: InputField[];
   submitButtonText?: string;
+  submitButtonTextColor?: string;
+  submitButtonBackgroundColor?: string;
+  submitButtonAlignment?: Exclude<Alignment, 'justify'>;
+  submitButtonWidth?: string;
   submitAction?: {
     type: 'track_event' | 'update_profile' | 'both';
     eventName?: string;
     eventProperties?: Record<string, string>;
     profileAttributes?: Record<string, string>;
+    mappedEventPropertiesOnly?: boolean;
+    mappedProfileOnly?: boolean;
   };
   alignment?: Alignment;
+  privacyNoticeHtml?: string;
+  consentFieldId?: string;
 }
 
 export interface BlockConfig {
@@ -133,6 +183,8 @@ export interface BlockConfig {
   row?: RowBlockConfig;
   form?: FormBlockConfig;
   input?: InputField;
+  spacer?: SpacerBlockConfig;
+  countdown?: CountdownBlockConfig;
 }
 
 export interface Block {
@@ -148,7 +200,9 @@ export interface InAppMessagePage {
   blocks: Block[];
   settings?: {
     backgroundColor?: string;
+    backgroundOpacity?: number;
     backgroundImage?: string;
+    backgroundImageEnabled?: boolean;
     maxWidth?: string;
     borderRadius?: string;
     [key: string]: any;

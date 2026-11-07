@@ -17,8 +17,10 @@ Customer Data Platform SDK for React Native applications (iOS and Android). Trac
 ## Installation
 
 ```bash
-npm install @tappd/react-native-sdk @react-native-async-storage/async-storage
+npm install @tappd/react-native-sdk @react-native-async-storage/async-storage react-native-webview
 ```
+
+`react-native-webview` is required to render custom HTML in-app message blocks (JS + CSS execute in a real browser context). On iOS run `pod install` after installing.
 
 For push notifications, you'll also need:
 ```bash
@@ -963,7 +965,7 @@ Messages can contain multiple blocks:
 - **Image** - Display images with alignment options
 - **Text** - Text content with styling (font size, weight, color, alignment)
 - **Button** - Clickable buttons with links and custom styling
-- **HTML** - Basic HTML content (simplified rendering, use react-native-render-html for full support)
+- **HTML** - Custom HTML rendered in a `WebView`, so authored `<script>` and `<style>`/CSS execute exactly like the web dashboard preview (requires the `react-native-webview` peer dependency)
 
 ### Event Tracking
 

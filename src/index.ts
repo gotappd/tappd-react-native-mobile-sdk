@@ -3,10 +3,20 @@
  * Customer Data Platform SDK for iOS and Android applications
  */
 
+import {
+  CUSTOMER_SYSTEM_ATTRIBUTE_KEYS,
+  CUSTOMER_SYSTEM_ATTRIBUTE_KEY_LIST,
+} from './customerSystemAttributeKeys';
 import { AppState, AppStateStatus, Linking, Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DeviceInfo from 'react-native-device-info';
-
+import {
+  recordLocalTouch,
+  getTouchesForConversion,
+  flushAttributionSync,
+  syncIdentifyMerge,
+} from './attributionStore';
+import { sortInAppMessagesByPriority } from './iamDisplayPriority';
 export interface TappdConfig {
   appId: string; // Required: App ID from dashboard
   apiUrl?: string; // Optional: Custom API URL
@@ -29,6 +39,13 @@ export interface CustomerAttributes {
   name?: string;
   email?: string;
   phone?: string;
+  timezone?: string;
+  locale?: string;
+  country?: string;
+  city?: string;
+  last_device_name?: string;
+  deviceName?: string;
+  systemAttributes?: Record<string, string>;
   [key: string]: any;
 }
 
@@ -67,6 +84,8 @@ export class TappdSDK {
   private appStateSubscription: any = null;
   private linkingSubscription: any = null;
   private displayedMessages: Set<string> = new Set();
+  /** One-at-a-time IAM queue lock — id of the message currently on screen. */
+  private activeMessageId: string | null = null;
   private messagePollingTimer: any = null;
   private activityTimer: any = null;
   private lastActivityTime: number = Date.now();
@@ -140,6 +159,11 @@ export class TappdSDK {
         this.initializeInAppMessages();
       }
 
+      // Flush attribution queue after init
+      setTimeout(() => {
+        this.flushAttribution().catch(() => {});
+      }, 1500);
+
       this.log('[Tappd SDK] Initialized with App ID:', this.appId.substring(0, 15) + '...');
     } catch (error) {
       this.log('[Tappd SDK] Initialization error:', error);
@@ -187,7 +211,8 @@ export class TappdSDK {
   }
 
   /**
-   * Start a new session
+   * Start a new session (client-side) and persist to server/ClickHouse.
+   * Does not require identify — anonymousId is enough for Session Analytics totals.
    */
   private startNewSession() {
     const sessionId = 'sess_' + Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
@@ -199,6 +224,41 @@ export class TappdSDK {
     };
 
     this.log('[Tappd SDK] New session started:', sessionId.substring(0, 15));
+    this.persistSessionStart().catch((err) => {
+      this.log('[Tappd SDK] session/start failed:', err);
+    });
+  }
+
+  /**
+   * Persist session start to api-sdk → Mongo + ClickHouse (no /track, no identify required)
+   */
+  private async persistSessionStart(): Promise<void> {
+    if (!this.session) return;
+
+    const externalId = await this.getExternalId();
+    await this.post('/session/start', {
+      sessionId: this.session.sessionId,
+      anonymousId: this.anonymousId,
+      userId: this.currentUserId || undefined,
+      external_id: externalId || undefined,
+      startedAt: this.session.startedAt,
+      ...this.getDeviceInfo(),
+    });
+  }
+
+  /**
+   * Heartbeat: update lastActivityAt / customer lastSeen on every app open/foreground
+   */
+  private async persistSessionHeartbeat(): Promise<void> {
+    if (!this.session) return;
+
+    const externalId = await this.getExternalId();
+    await this.post('/session/heartbeat', {
+      sessionId: this.session.sessionId,
+      anonymousId: this.anonymousId,
+      userId: this.currentUserId || undefined,
+      external_id: externalId || undefined,
+    });
   }
 
   /**
@@ -235,9 +295,17 @@ export class TappdSDK {
     // Track current app state
     const handleAppStateChange = async (nextAppState: AppStateStatus) => {
       if (nextAppState === 'active') {
-        // App came to foreground
+        // App came to foreground — refresh or heartbeat session lifecycle
+        const previousSessionId = this.session?.sessionId;
         this.checkAndRefreshSession();
         this.updateSessionActivity();
+
+        // New session already called persistSessionStart; otherwise heartbeat lastSeen
+        if (this.session && this.session.sessionId === previousSessionId) {
+          this.persistSessionHeartbeat().catch((err) => {
+            this.log('[Tappd SDK] session/heartbeat failed:', err);
+          });
+        }
         
         // Update activity for message polling
         this.updateActivity();
@@ -382,12 +450,15 @@ export class TappdSDK {
         await this.setStoredTimezone(timezone);
       }
 
+      const systemAttributes = await this.buildSystemAttributesPayload(attributes);
+
       const response = await this.post('/identify', {
         external_id: attributes.external_id,
         name: attributes?.name,
         email: attributes?.email,
         phone: attributes?.phone,
         timezone: timezone || undefined,
+        ...(systemAttributes ? { systemAttributes } : {}),
         anonymousId: this.anonymousId, // Include anonymous ID for merging
         attributes: this.extractCustomAttributes(attributes)
       });
@@ -397,7 +468,27 @@ export class TappdSDK {
         this.currentUserId = response.data.userId;
       }
 
+      try {
+        await syncIdentifyMerge(
+          (path, body) => this.post(path, body),
+          {
+            anonymousId: this.anonymousId,
+            userId: this.currentUserId,
+            externalId: attributes.external_id,
+            customerId: response?.data?.customerId,
+          }
+        );
+        await this.flushAttribution();
+      } catch (attrErr) {
+        this.log('[Tappd SDK] Attribution identify-merge error:', attrErr);
+      }
+
       this.log('[Tappd SDK] Customer identified:', attributes.external_id);
+
+      // Link current anonymous session to the identified customer + refresh lastSeen
+      this.persistSessionHeartbeat().catch((err) => {
+        this.log('[Tappd SDK] session/heartbeat after identify failed:', err);
+      });
       
       // After identification, fetch messages immediately
       if (this.enableInAppMessages && this.autoDisplayMessages) {
@@ -504,6 +595,8 @@ export class TappdSDK {
       // Check if timezone has changed (only if user is identified)
       const timezoneChanged = this.currentUserId ? await this.checkTimezoneChange() : null;
 
+      const attributionTouches = await getTouchesForConversion();
+
       const response = await this.post('/track', {
         eventName,
         properties: properties || {},
@@ -512,7 +605,9 @@ export class TappdSDK {
         sessionDuration,
         userId,
         external_id: externalId,  // Include external_id if available
+        anonymousId: this.anonymousId,
         timezone: timezoneChanged || undefined,  // Send timezone if it changed
+        attributionTouches,
         ...deviceInfo
       });
 
@@ -536,10 +631,8 @@ export class TappdSDK {
         // Save cache
         await this.saveMessageCache();
         
-        // Display personalized messages immediately
-        for (const message of response.data.inAppMessages) {
-          await this.displayInAppMessage(message);
-        }
+        // One-at-a-time queue: show highest-priority eligible message
+        await this.displayPendingMessages(false);
       } else {
         // Check if any pending messages are waiting for this event (fallback)
         this.checkEventTriggers(eventName).catch((error) => {
@@ -574,19 +667,36 @@ export class TappdSDK {
         remoteMessage.data?.message_id;
 
       const data = remoteMessage.data || {};
+      const deliveryLogId =
+        data.tappd_delivery_log_id
+          ? String(data.tappd_delivery_log_id)
+          : undefined;
 
       const properties: EventProperties = {
         notificationId,
         title: remoteMessage.notification?.title,
         body: remoteMessage.notification?.body,
+        deliveryLogId,
+        journeyId: data.tappd_journey_id,
+        enrollmentId: data.tappd_enrollment_id,
+        stepId: data.tappd_step_id,
+        customerId: data.tappd_customer_id,
         tappd_workspace_id: data.tappd_workspace_id,
         tappd_journey_id: data.tappd_journey_id,
         tappd_enrollment_id: data.tappd_enrollment_id,
         tappd_step_id: data.tappd_step_id,
         tappd_customer_id: data.tappd_customer_id,
+        tappd_delivery_log_id: deliveryLogId,
         tappd_message_type: data.tappd_message_type || 'push',
         platform: Platform.OS,
       };
+
+      // Prefer /push/interactions when delivery log id is present so journey
+      // delivery logs and ClickHouse engagement events stay in sync.
+      if (deliveryLogId) {
+        await this.trackPushInteraction('opened', properties);
+        return;
+      }
 
       await this.track('push_notification.opened', properties);
     } catch (error) {
@@ -669,10 +779,10 @@ export class TappdSDK {
       if (!data || !this.isIamSyncPushData(data)) {
         return;
       }
-      await this.syncInAppMessages();
       const iamId = this.resolveIamIdFromPushData(data);
+      await this.getInAppMessages(true);
       if (iamId) {
-        await this.triggerInAppMessageById(iamId, true);
+        await this.triggerInAppMessageById(iamId, false, { forceDisplay: true });
       }
     } catch (error) {
       this.log('[Tappd SDK] handleForegroundPushForInAppMessages error:', error);
@@ -694,9 +804,9 @@ export class TappdSDK {
         return;
       }
       await this.trackPushOpen(remoteMessage);
-      await this.syncInAppMessages();
+      await this.getInAppMessages(true);
       if (iamId) {
-        await this.triggerInAppMessageById(iamId, true);
+        await this.triggerInAppMessageById(iamId, false, { forceDisplay: true });
       }
     } catch (error) {
       this.log('[Tappd SDK] handleNotificationOpenForInAppMessages error:', error);
@@ -978,8 +1088,62 @@ export class TappdSDK {
   /**
    * Extract custom attributes (exclude standard fields)
    */
+  private async buildSystemAttributesPayload(
+    attributes: CustomerAttributes
+  ): Promise<Record<string, string> | undefined> {
+    const K = CUSTOMER_SYSTEM_ATTRIBUTE_KEYS;
+    const allowed = new Set<string>([...CUSTOMER_SYSTEM_ATTRIBUTE_KEY_LIST]);
+    const out: Record<string, string> = {};
+
+    if (attributes.systemAttributes) {
+      for (const [key, val] of Object.entries(attributes.systemAttributes)) {
+        if (val === undefined || val === null) continue;
+        if (!allowed.has(key)) continue;
+        out[key] = String(val);
+      }
+    }
+
+    const tz = attributes.timezone || this.getCurrentTimezone();
+    if (tz) out[K.TIMEZONE] = String(tz);
+
+    if (attributes.locale) out[K.LOCALE] = String(attributes.locale);
+    if (attributes.country) out[K.COUNTRY] = String(attributes.country);
+    if (attributes.city) out[K.CITY] = String(attributes.city);
+
+    const explicitDevice =
+      attributes.last_device_name || attributes.deviceName || out[K.LAST_DEVICE_NAME];
+    if (explicitDevice) {
+      out[K.LAST_DEVICE_NAME] = String(explicitDevice);
+    } else {
+      try {
+        const info = await this.getFullDeviceInfo();
+        const label = info.deviceName
+          ? String(info.deviceName)
+          : [info.deviceBrand, info.deviceModel].filter(Boolean).join(' ').trim();
+        if (label) out[K.LAST_DEVICE_NAME] = label;
+      } catch {
+        // ignore
+      }
+    }
+
+    return Object.keys(out).length ? out : undefined;
+  }
+
   private extractCustomAttributes(attributes: CustomerAttributes): Record<string, any> {
-    const { external_id, name, email, phone, timezone, ...custom } = attributes;
+    const {
+      external_id,
+      name,
+      email,
+      phone,
+      timezone,
+      locale,
+      country,
+      city,
+      last_device_name,
+      deviceName,
+      systemAttributes,
+      ...custom
+    } = attributes;
     return custom;
   }
 
@@ -1086,6 +1250,25 @@ export class TappdSDK {
       this.log('[Tappd SDK] Check push subscription error:', error);
       throw error;
     }
+  }
+
+  /**
+   * Open preference center (returns signed URL; caller should open Linking.openURL)
+   */
+  async openPreferenceCenter(options: { preferenceCenterId?: string } = {}): Promise<string> {
+    const externalId = await this.getExternalId();
+    if (!externalId) {
+      throw new Error('Customer must be identified before opening preference center');
+    }
+    const response = await this.post('/preference-center/open', {
+      external_id: externalId,
+      preferenceCenterId: options.preferenceCenterId || undefined,
+    });
+    const url = response?.data?.url;
+    if (!url) {
+      throw new Error(response?.error || 'Failed to open preference center');
+    }
+    return url;
   }
 
   /**
@@ -1575,10 +1758,22 @@ export class TappdSDK {
   /**
    * Display a single in-app message
    */
-  async displayInAppMessage(message: any): Promise<void> {
+  async displayInAppMessage(
+    message: any,
+    options?: { forceDisplay?: boolean },
+  ): Promise<void> {
     try {
       // Ensure we have loaded the set of already-shown messages
       await this.loadShownMessages();
+
+      const forceDisplay = options?.forceDisplay === true;
+      const isTest = message.isTest === true;
+
+      // One-at-a-time queue: skip if another message is already on screen
+      if (this.activeMessageId && !forceDisplay && !isTest) {
+        this.log('[Tappd SDK] Another message is active, deferring:', message._id);
+        return;
+      }
 
       // Check if message has expired
       if (this.checkMessageExpiration(message)) {
@@ -1587,7 +1782,7 @@ export class TappdSDK {
       }
 
       // Check if message is already displayed
-      if (this.displayedMessages.has(message._id)) {
+      if (!forceDisplay && !isTest && this.displayedMessages.has(message._id)) {
         this.log('[Tappd SDK] Message already displayed:', message._id);
         return;
       }
@@ -1596,8 +1791,13 @@ export class TappdSDK {
       const triggerConfig = message.triggerConfig || message.config?.triggerConfig;
       
       // For immediate triggers, check if message has been shown before
-      // Only show again if journey is recurring
-      if (triggerConfig?.type === 'immediate' && this.shownMessages.has(message._id)) {
+      // Only show again if journey is recurring (test IAMs always bypass)
+      if (
+        !forceDisplay &&
+        !isTest &&
+        triggerConfig?.type === 'immediate' &&
+        this.shownMessages.has(message._id)
+      ) {
         const isRecurring = message.journeyRecurring === true;
         if (!isRecurring) {
           this.log('[Tappd SDK] Message already shown and journey is not recurring, skipping:', message._id);
@@ -1605,17 +1805,20 @@ export class TappdSDK {
         }
       }
       
-      if (!this.evaluateTrigger(triggerConfig, message)) {
+      if (!forceDisplay && !this.evaluateTrigger(triggerConfig, message)) {
         this.log('[Tappd SDK] Trigger condition not met for message:', message._id);
         return;
       }
 
       // Call render callback if set
-      if (this.messageRenderCallback) {
-        this.messageRenderCallback(message);
-      } else {
+      if (!this.messageRenderCallback) {
         this.log('[Tappd SDK] No message render callback set. Use setMessageRenderCallback() to render messages.');
+        return;
       }
+
+      // Lock queue before render
+      this.activeMessageId = message._id;
+      this.messageRenderCallback(message);
 
       // Mark as displayed for this session
       this.displayedMessages.add(message._id);
@@ -1635,8 +1838,31 @@ export class TappdSDK {
 
       this.log('[Tappd SDK] Message displayed:', message._id);
     } catch (error) {
+      if (this.activeMessageId === message?._id) {
+        this.activeMessageId = null;
+      }
       this.log('[Tappd SDK] Display message error:', error);
     }
+  }
+
+  /**
+   * Pick the highest-priority eligible message for the one-at-a-time queue.
+   */
+  private pickNextEligibleMessage(messages: any[]): any | null {
+    const candidates = messages.filter((msg) => {
+      if (!msg || !msg._id) return false;
+      if (this.displayedMessages.has(msg._id)) return false;
+      if (this.checkMessageExpiration(msg)) return false;
+      if (this.shownMessages.has(msg._id) && msg.journeyRecurring !== true) {
+        return false;
+      }
+      const triggerConfig = msg.triggerConfig || msg.config?.triggerConfig;
+      return this.evaluateTrigger(triggerConfig, msg);
+    });
+
+    if (candidates.length === 0) return null;
+    const sorted = sortInAppMessagesByPriority(candidates);
+    return sorted[0] || null;
   }
 
   /**
@@ -1644,23 +1870,48 @@ export class TappdSDK {
    * Uses the existing getInAppMessages + displayInAppMessage pipeline so
    * triggers, expiration, and tracking behavior stay consistent.
    */
-  async triggerInAppMessageById(messageId: string, forceRefresh = true): Promise<void> {
-    try {
-      const messages = await this.getInAppMessages(forceRefresh);
-      const want = String(messageId);
-      const target = messages.find((msg: any) => {
+  async triggerInAppMessageById(
+    messageId: string,
+    forceRefresh = true,
+    options?: { forceDisplay?: boolean },
+  ): Promise<void> {
+    const forceDisplay = options?.forceDisplay === true;
+    if (this.activeMessageId && !forceDisplay) {
+      this.log('[Tappd SDK] triggerInAppMessageById deferred — another message is active');
+      return;
+    }
+
+    const want = String(messageId);
+    const findTarget = (messages: any[]) =>
+      messages.find((msg: any) => {
         if (!msg) return false;
         const id = msg._id != null ? String(msg._id) : '';
         const alt = msg.id != null ? String(msg.id) : '';
         return id === want || alt === want;
       });
-      if (!target) {
-        this.log('[Tappd SDK] triggerInAppMessageById: no message found for id:', messageId);
+
+    const maxAttempts = forceDisplay ? 2 : 1;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        if (attempt > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        const messages = await this.getInAppMessages(forceRefresh || attempt > 0);
+        const target = findTarget(messages);
+        if (!target) {
+          if (attempt < maxAttempts - 1) {
+            continue;
+          }
+          this.log('[Tappd SDK] triggerInAppMessageById: no message found for id:', messageId);
+          return;
+        }
+        await this.displayInAppMessage(target, options);
         return;
+      } catch (error) {
+        if (attempt >= maxAttempts - 1) {
+          this.log('[Tappd SDK] triggerInAppMessageById error:', error);
+        }
       }
-      await this.displayInAppMessage(target);
-    } catch (error) {
-      this.log('[Tappd SDK] triggerInAppMessageById error:', error);
     }
   }
 
@@ -1673,16 +1924,17 @@ export class TappdSDK {
     }
 
     try {
-      const messages = await this.getInAppMessages(forceRefresh);
-      
-      // Filter out already displayed messages
-      const newMessages = messages.filter(
-        (msg) => !this.displayedMessages.has(msg._id)
-      );
+      await this.loadShownMessages();
 
-      // Display messages one by one
-      for (const message of newMessages) {
-        await this.displayInAppMessage(message);
+      if (this.activeMessageId) {
+        this.log('[Tappd SDK] Display pending skipped — message already active:', this.activeMessageId);
+        return;
+      }
+
+      const messages = await this.getInAppMessages(forceRefresh);
+      const candidate = this.pickNextEligibleMessage(messages);
+      if (candidate) {
+        await this.displayInAppMessage(candidate);
       }
     } catch (error) {
       this.log('[Tappd SDK] Display pending messages error:', error);
@@ -1718,8 +1970,17 @@ export class TappdSDK {
         });
       }
 
+      // Release queue lock and try next eligible message
+      if (this.activeMessageId === messageId) {
+        this.activeMessageId = null;
+      }
+      await this.displayPendingMessages(false);
+
       this.log('[Tappd SDK] Message dismissed:', messageId);
     } catch (error) {
+      if (this.activeMessageId === messageId) {
+        this.activeMessageId = null;
+      }
       this.log('[Tappd SDK] Dismiss message error:', error);
     }
   }
@@ -1773,13 +2034,122 @@ export class TappdSDK {
    */
   async trackMessageEvent(messageId: string, eventType: string, metadata: Record<string, any>): Promise<void> {
     try {
+      if (eventType === 'clicked') {
+        const cached = this.messageCache.get(messageId);
+        await recordLocalTouch({
+          channel: 'in_app_message',
+          touchType: 'click',
+          messageId,
+          deliveryLogId: metadata?.deliveryLogId || cached?.deliveryLogId,
+          journeyId: metadata?.journeyId || cached?.journeyId,
+          enrollmentId: metadata?.enrollmentId || cached?.enrollmentId,
+          stepId: metadata?.stepId || cached?.stepId,
+          source: 'iam',
+          sessionId: this.session?.sessionId,
+        });
+      }
+
       await this.track(`message.${eventType}`, {
         messageId,
         ...metadata,
       });
+
+      if (eventType === 'viewed') {
+        await this.markMessageInteraction(messageId, 'opened');
+      } else if (eventType === 'clicked') {
+        await this.markMessageInteraction(messageId, 'clicked');
+        await this.flushAttribution();
+      }
     } catch (error) {
       this.log('[Tappd SDK] Track message event error:', error);
     }
+  }
+
+  /**
+   * Promote IAM open/click to delivery log (parity with web SDK).
+   */
+  private async markMessageInteraction(
+    messageId: string,
+    type: 'opened' | 'clicked'
+  ): Promise<void> {
+    try {
+      const response = await fetch(`${this.apiUrl}/in-app-messages/${messageId}/interactions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-App-Id': this.appId,
+        },
+        body: JSON.stringify({ type, anonymousId: this.anonymousId }),
+      });
+      if (!response.ok) {
+        throw new Error(`Request failed: ${response.statusText}`);
+      }
+    } catch (error) {
+      this.log('[Tappd SDK] Mark message interaction error:', error);
+    }
+  }
+
+  /**
+   * Track push opened/clicked with local attribution touch.
+   */
+  async trackPushInteraction(
+    type: 'opened' | 'clicked',
+    properties?: EventProperties
+  ): Promise<void> {
+    const deliveryLogId = properties?.deliveryLogId ? String(properties.deliveryLogId) : undefined;
+    const messageId = properties?.messageId
+      ? String(properties.messageId)
+      : deliveryLogId;
+
+    await recordLocalTouch({
+      channel: 'push',
+      touchType: type === 'clicked' ? 'click' : 'impression',
+      messageId,
+      deliveryLogId,
+      journeyId: properties?.journeyId ? String(properties.journeyId) : undefined,
+      enrollmentId: properties?.enrollmentId ? String(properties.enrollmentId) : undefined,
+      stepId: properties?.stepId ? String(properties.stepId) : undefined,
+      source: 'push',
+      sessionId: this.session?.sessionId,
+      isTest: !!properties?.isTest,
+    });
+
+    if (deliveryLogId) {
+      try {
+        await this.post('/push/interactions', {
+          type,
+          deliveryLogId,
+          enrollmentId: properties?.enrollmentId,
+          journeyId: properties?.journeyId,
+          stepId: properties?.stepId,
+          customerId: properties?.customerId,
+          providerMessageId: properties?.providerMessageId,
+          platform: properties?.platform || Platform.OS,
+          deviceId: properties?.deviceId,
+          anonymousId: this.anonymousId,
+          metadata: properties || {},
+        });
+        await this.flushAttribution();
+        return;
+      } catch (err) {
+        this.log('[Tappd SDK] Push interactions endpoint error:', err);
+      }
+    }
+
+    await this.track(`push_notification.${type}`, properties);
+    await this.flushAttribution();
+  }
+
+  private async flushAttribution(): Promise<void> {
+    const externalId = await this.getExternalId();
+    await flushAttributionSync(
+      (path, body) => this.post(path, body),
+      {
+        anonymousId: this.anonymousId,
+        userId: this.currentUserId,
+        externalId,
+      }
+    );
   }
 
   /**
@@ -1939,14 +2309,15 @@ export class TappdSDK {
       }
     }
 
-    // Display messages that were waiting for this event
-    for (const message of messagesToDisplay) {
-      await this.displayInAppMessage(message);
+    // Display highest-priority waiting message (one-at-a-time queue)
+    if (messagesToDisplay.length > 0 && !this.activeMessageId) {
+      const sorted = sortInAppMessagesByPriority(messagesToDisplay);
+      await this.displayInAppMessage(sorted[0]);
     }
 
     // Remove displayed messages from waiting list
     for (const messageId of waitingMessageIds) {
-      if (this.displayedMessages.has(messageId)) {
+      if (this.displayedMessages.has(messageId) || this.shownMessages.has(messageId)) {
         waitingMessageIds.delete(messageId);
       }
     }

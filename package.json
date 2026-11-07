@@ -1,6 +1,6 @@
 {
   "name": "@tappd/react-native-sdk",
-  "version": "1.0.12",
+  "version": "1.0.26",
   "description": "Tappd Mobile SDK for React Native (iOS & Android) - Customer Data Platform SDK",
   "main": "dist/index.js",
   "module": "dist/index.js",
@@ -41,12 +41,14 @@
     "react-native-render-html": "^6.3.4"
   },
   "peerDependencies": {
-    "react-native": ">=0.60.0",
     "@react-native-async-storage/async-storage": "^1.19.0",
-    "react-native-device-info": ">=10.0.0"
+    "react-native": ">=0.60.0",
+    "react-native-device-info": ">=10.0.0",
+    "react-native-webview": ">=11.0.0"
   },
   "devDependencies": {
     "@types/react-native": "^0.72.0",
+    "react-native-webview": "^13.17.0",
     "typescript": "^5.0.0"
   }
 }

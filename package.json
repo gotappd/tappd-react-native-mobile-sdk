@@ -1,6 +1,6 @@
 {
   "name": "@tappd/react-native-sdk",
-  "version": "1.0.26",
+  "version": "1.0.27",
   "description": "Tappd Mobile SDK for React Native (iOS & Android) - Customer Data Platform SDK",
   "main": "dist/index.js",
   "module": "dist/index.js",
@@ -23,8 +23,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/gotappd/tappd.io.git",
-    "directory": "packages/react-native-mobile-sdk"
+    "url": "https://github.com/gotappd/tappd-react-native-mobile-sdk.git"
   },
   "keywords": [
     "tappd",

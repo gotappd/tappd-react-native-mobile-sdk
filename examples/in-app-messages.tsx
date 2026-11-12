@@ -11,7 +11,7 @@ import TappdSDK, { MessageRenderer, type InAppMessage } from '@tappd/react-nativ
 // Initialize SDK with in-app messages enabled
 const tappd = new TappdSDK({
   appId: 'YOUR_APP_ID',
-  apiUrl: 'https://sdk.gotappd.com/api/v1/sdk',
+  apiUrl: 'https://sdk.tappd.io/api/v1/sdk',
   autoTrack: true,
   sessionTimeout: 30,
   enableAutoScreenTracking: true,

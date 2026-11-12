@@ -12,7 +12,7 @@ import { useFocusEffect } from '@react-navigation/native';
 // Initialize SDK (do this once, typically in App.tsx or a config file)
 const tappd = new TappdSDK({
   appId: 'YOUR_APP_ID',
-  apiUrl: 'https://sdk.gotappd.com/api/v1/sdk',
+  apiUrl: 'https://sdk.tappd.io/api/v1/sdk',
   autoTrack: true,
   sessionTimeout: 30,
   enableAutoScreenTracking: true,

@@ -892,6 +892,68 @@ export async function startGeofencing() {
 
 Calling `startGeofencingAsync` again with the same task replaces the watched regions, so call `startGeofencing()` again whenever `shouldRefreshGeofences` returns true.
 
+## Live Activities (iOS)
+
+> **Draft.** The native iOS part (`ios/TappdLiveActivities*.swift`) has not been compiled or run yet. Build and test it on a Mac before relying on it.
+
+Live Activities show live information (an order, a ride, a match) on the Lock Screen and in the Dynamic Island. Your servers start, update and end them through the Tappd API, and Apple delivers them directly: no Firebase involved.
+
+**Requirements:** iOS 16.1+ to update and end activities, iOS 17.2+ to start them from your server.
+
+### 1. Add your APNs key in Tappd
+
+Dashboard → Settings → Apps → your iOS app → **Live Activities**: Key ID, Team ID, bundle ID and the `.p8` key (Apple developer account → Certificates, Identifiers & Profiles → Keys → a key with Apple Push Notifications service). Choose **Sandbox** while testing builds run from Xcode.
+
+### 2. Set up the activity in your app
+
+1. Add a **Widget Extension** with a Live Activity, as in Apple's [ActivityKit guide](https://developer.apple.com/documentation/activitykit/displaying-live-data-with-live-activities). Share your `ActivityAttributes` type between the app and the extension. Include a property with your own key for each activity (for example `orderId`).
+2. Add `NSSupportsLiveActivities` = `YES` to the app's `Info.plist`.
+3. In `AppDelegate`, register each attributes type and say which property is its key:
+
+```swift
+import tappd_react_native_sdk
+
+func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+  if #available(iOS 17.2, *) {
+    TappdLiveActivities.observe(DeliveryAttributes.self) { $0.orderId }
+  }
+  // …
+}
+```
+
+4. In JavaScript, turn on token forwarding once the SDK is created:
+
+```ts
+tappd.enableLiveActivities(); // no-op on Android or without the native module
+```
+
+Tokens that arrive before `identify()` are sent right after it, since Tappd can only target known customers.
+
+### 3. Start, update and end from your server
+
+Use an API key with the `content:write` scope (Settings → Developers). `activityType` is your attributes type's name; `activityKey` is the same key the app reports, and addresses the activity in later calls.
+
+```bash
+# Start (iOS 17.2+). The alert is required by Apple to start an activity.
+curl -X POST https://api.tappd.io/api/v1/sdk/workspaces/$WORKSPACE_ID/live-activities/start \
+  -H "x-api-key: $TAPPD_API_KEY" -H "Content-Type: application/json" \
+  -d '{"appId":"<ios app id>","activityType":"DeliveryAttributes","activityKey":"order-1001",
+       "customer":{"external_id":"cust-42"},
+       "attributes":{"orderId":"order-1001"},
+       "contentState":{"status":"Preparing","eta":25},
+       "alert":{"title":"Order confirmed","body":"Arriving in about 25 minutes"}}'
+
+# Update. Without an alert it goes at low priority, which Apple doesn't limit as strictly.
+curl -X POST .../live-activities/order-1001/update -H "x-api-key: $TAPPD_API_KEY" -H "Content-Type: application/json" \
+  -d '{"appId":"<ios app id>","contentState":{"status":"On the way","eta":12}}'
+
+# End. dismissalDate is when it leaves the Lock Screen (default: up to 4 hours).
+curl -X POST .../live-activities/order-1001/end -H "x-api-key: $TAPPD_API_KEY" -H "Content-Type: application/json" \
+  -d '{"appId":"<ios app id>","contentState":{"status":"Delivered","eta":0},"dismissalDate":"2026-11-14T20:00:00Z"}'
+```
+
+`appId` can be left out when the API key belongs to one app. Each response says how many devices Apple accepted it for. Right after a start, `update` may answer `pending: true` until the device has registered the new activity; retry after a few seconds. Activities your app starts itself (`Activity.request(…, pushType: .token)`) can be updated and ended the same way, using the key the app reported.
+
 ## In-App Messages
 
 The SDK supports IAM from the dashboard (including row/form/input blocks and multi-page messages). Pending messages are fetched on each poll (the SDK does not skip the network just because cached messages exist), so **test IAM typically appears within the polling interval** for an identified user.

@@ -7,7 +7,7 @@ import {
   CUSTOMER_SYSTEM_ATTRIBUTE_KEYS,
   CUSTOMER_SYSTEM_ATTRIBUTE_KEY_LIST,
 } from './customerSystemAttributeKeys';
-import { AppState, AppStateStatus, Linking, Platform } from 'react-native';
+import { AppState, AppStateStatus, Linking, NativeEventEmitter, NativeModules, Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DeviceInfo from 'react-native-device-info';
 import {
@@ -18,6 +18,7 @@ import {
 } from './attributionStore';
 import { sortInAppMessagesByPriority } from './iamDisplayPriority';
 import type { GeofenceTrigger, LatLng, TappdGeofenceList } from './geofences';
+import { LIVE_ACTIVITY_EVENTS, pendingKey, type LiveActivityEndedEvent, type LiveActivityTokenEvent } from './liveActivities';
 export interface TappdConfig {
   appId: string; // Required: App ID from dashboard
   apiUrl?: string; // Optional: Custom API URL
@@ -79,6 +80,9 @@ export class TappdSDK {
   private messageFetchDedupeMs: number;
 
   private currentUserId: string | null = null;
+  /** Live Activity tokens that arrived before identify(); sent once the user is known. */
+  private pendingLiveActivityTokens = new Map<string, LiveActivityTokenEvent>();
+  private liveActivitySubscriptions: { remove(): void }[] = [];
   private anonymousId: string | null = null;
   private session: Session | null = null;
   private screenTracker: ScreenTracker | null = null;
@@ -485,6 +489,8 @@ export class TappdSDK {
       }
 
       this.log('[Tappd SDK] Customer identified:', attributes.external_id);
+
+      this.flushPendingLiveActivityTokens().catch(() => undefined);
 
       // Link current anonymous session to the identified customer + refresh lastSeen
       this.persistSessionHeartbeat().catch((err) => {
@@ -1334,6 +1340,73 @@ export class TappdSDK {
       // Like track(): a failed report must never break the app.
       this.log('[Tappd SDK] Geofence report error:', error);
     }
+  }
+
+  /**
+   * Sends a Live Activity token to Tappd. Normally called for you by
+   * enableLiveActivities(); call it yourself if your app collects ActivityKit tokens on its own.
+   * Before identify() the token is kept and sent after it.
+   */
+  async registerLiveActivityToken(event: LiveActivityTokenEvent): Promise<void> {
+    if (!event?.token || !event.activityType) return;
+    const externalId = await this.getExternalId();
+    if (!this.currentUserId && !externalId) {
+      this.pendingLiveActivityTokens.set(pendingKey(event), event);
+      return;
+    }
+    try {
+      const deviceId = await this.getOrCreateDeviceId();
+      await this.post('/live-activities/tokens', {
+        ...event,
+        userId: this.currentUserId,
+        external_id: externalId,
+        deviceId,
+      });
+      this.pendingLiveActivityTokens.delete(pendingKey(event));
+      this.log('[Tappd SDK] Live Activity token registered:', event.kind, event.activityType, event.activityKey || '');
+    } catch (error) {
+      // Keep it for the next identify() or app start.
+      this.pendingLiveActivityTokens.set(pendingKey(event), event);
+      this.log('[Tappd SDK] Live Activity token error:', error);
+    }
+  }
+
+  /** Tells Tappd an activity ended on the device, so it stops sending updates to it. */
+  async liveActivityEnded(event: LiveActivityEndedEvent): Promise<void> {
+    try {
+      await this.post('/live-activities/ended', event);
+    } catch (error) {
+      this.log('[Tappd SDK] Live Activity ended error:', error);
+    }
+  }
+
+  /**
+   * Starts forwarding tokens from the native Tappd Live Activities module (iOS only).
+   * Register your ActivityAttributes types in Swift first (see the README). Safe to call on
+   * Android or when the native module isn't installed: it does nothing.
+   */
+  enableLiveActivities(): boolean {
+    const native = (NativeModules as any).TappdLiveActivities;
+    if (Platform.OS !== 'ios' || !native) {
+      this.log('[Tappd SDK] Live Activities native module not available');
+      return false;
+    }
+    if (this.liveActivitySubscriptions.length) return true;
+    const emitter = new NativeEventEmitter(native);
+    this.liveActivitySubscriptions = [
+      emitter.addListener(LIVE_ACTIVITY_EVENTS.token, (e: LiveActivityTokenEvent) => {
+        this.registerLiveActivityToken(e).catch(() => undefined);
+      }),
+      emitter.addListener(LIVE_ACTIVITY_EVENTS.ended, (e: LiveActivityEndedEvent) => {
+        this.liveActivityEnded(e).catch(() => undefined);
+      }),
+    ];
+    return true;
+  }
+
+  private async flushPendingLiveActivityTokens(): Promise<void> {
+    const pending = [...this.pendingLiveActivityTokens.values()];
+    for (const e of pending) await this.registerLiveActivityToken(e);
   }
 
   /**
@@ -2659,3 +2732,5 @@ export default TappdSDK;
 
 export { distanceMeters, shouldRefreshGeofences } from './geofences';
 export type { GeofenceTrigger, LatLng, TappdGeofence, TappdGeofenceList } from './geofences';
+export { LIVE_ACTIVITY_EVENTS } from './liveActivities';
+export type { LiveActivityTokenEvent, LiveActivityEndedEvent, LiveActivityTokenKind } from './liveActivities';

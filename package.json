@@ -9,7 +9,9 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "ios",
+    "tappd-react-native-sdk.podspec"
   ],
   "scripts": {
     "build": "tsc",

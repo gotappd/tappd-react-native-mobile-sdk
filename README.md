@@ -836,6 +836,62 @@ For detailed endpoint documentation, see [API_ENDPOINTS.md](../API_ENDPOINTS.md)
 
 ---
 
+## Geofencing
+
+Create geofences in the Tappd dashboard (**Audience → Geofences**). When someone enters, leaves or stays in one, Tappd records `geofence.entered`, `geofence.exited` or `geofence.dwelled` with `geofenceId`, `geofenceName` and the properties you set, so you can start journeys and build segments from visits.
+
+The SDK tells your app **which** geofences to watch and **records** the crossings. Watching regions on the device is done by a location library your app already uses (it needs "Always" location permission to work in the background). Phones can only watch a few regions at a time (iOS: 20 per app), so Tappd returns the nearest ones and tells you when to fetch again.
+
+```ts
+import { shouldRefreshGeofences } from '@tappd/react-native-sdk';
+
+// `tappd` is your `new TappdSDK({ appId })` instance.
+const { geofences, resyncAfterMeters } = await tappd.getGeofences({ latitude, longitude });
+// …register `geofences` with your region-monitoring library…
+
+// When your library reports a crossing:
+await tappd.reportGeofenceEvent(geofenceId, 'enter', { latitude, longitude }); // or 'exit' / 'dwell'
+
+// On significant location changes, refetch once the device has moved far enough:
+if (shouldRefreshGeofences(lastFetchPosition, currentPosition, resyncAfterMeters)) { /* fetch again */ }
+```
+
+### Example with expo-location
+
+[`expo-location`](https://docs.expo.dev/versions/latest/sdk/location/) works in Expo and bare React Native apps (with `expo-task-manager`). It reports enter and exit; for `dwell`, start a timer on enter and report `dwell` after the geofence's `dwellSeconds` if no exit arrived.
+
+```ts
+import * as Location from 'expo-location';
+import * as TaskManager from 'expo-task-manager';
+import { tappd } from './tappd'; // your shared `new TappdSDK({ appId })` instance
+
+const TASK = 'tappd-geofences';
+
+TaskManager.defineTask(TASK, async ({ data, error }: any) => {
+  if (error || !data) return;
+  const trigger = data.eventType === Location.GeofencingEventType.Enter ? 'enter' : 'exit';
+  await tappd.reportGeofenceEvent(data.region.identifier, trigger);
+});
+
+export async function startGeofencing() {
+  const fg = await Location.requestForegroundPermissionsAsync();
+  const bg = await Location.requestBackgroundPermissionsAsync();
+  if (fg.status !== 'granted' || bg.status !== 'granted') return;
+  const here = await Location.getCurrentPositionAsync({});
+  const { geofences } = await tappd.getGeofences(here.coords);
+  await Location.startGeofencingAsync(TASK, geofences.map((g) => ({
+    identifier: g.id,
+    latitude: g.latitude,
+    longitude: g.longitude,
+    radius: g.radius,
+    notifyOnEnter: g.triggers.enter || g.triggers.dwell,
+    notifyOnExit: g.triggers.exit || g.triggers.dwell,
+  })));
+}
+```
+
+Calling `startGeofencingAsync` again with the same task replaces the watched regions, so call `startGeofencing()` again whenever `shouldRefreshGeofences` returns true.
+
 ## In-App Messages
 
 The SDK supports IAM from the dashboard (including row/form/input blocks and multi-page messages). Pending messages are fetched on each poll (the SDK does not skip the network just because cached messages exist), so **test IAM typically appears within the polling interval** for an identified user.

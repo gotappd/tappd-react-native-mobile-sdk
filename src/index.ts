@@ -17,6 +17,7 @@ import {
   syncIdentifyMerge,
 } from './attributionStore';
 import { sortInAppMessagesByPriority } from './iamDisplayPriority';
+import type { GeofenceTrigger, LatLng, TappdGeofenceList } from './geofences';
 export interface TappdConfig {
   appId: string; // Required: App ID from dashboard
   apiUrl?: string; // Optional: Custom API URL
@@ -1289,6 +1290,49 @@ export class TappdSDK {
       // Fallback if AsyncStorage fails
       this.log('[Tappd SDK] AsyncStorage error, using in-memory device ID:', error);
       return 'device_' + Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+    }
+  }
+
+  /**
+   * Geofences this device should watch: the nearest ones to `position` (up to the phone's
+   * limit), or the latest ones without a position. Pass the list to your region-monitoring
+   * library, and fetch again once `shouldRefreshGeofences` says the device has moved far enough.
+   */
+  async getGeofences(position?: LatLng): Promise<TappdGeofenceList> {
+    const params: Record<string, string> = {};
+    if (position && Number.isFinite(position.latitude) && Number.isFinite(position.longitude)) {
+      params.latitude = String(position.latitude);
+      params.longitude = String(position.longitude);
+    }
+    const res = await this.get('/geofences', params);
+    return res?.data || { geofences: [], maxRegions: 20, resyncAfterMeters: null };
+  }
+
+  /**
+   * Reports a crossing your region monitoring detected. Tappd records geofence.entered,
+   * geofence.exited or geofence.dwelled for the current user, which journeys and segments
+   * can use. Repeats within a minute are ignored, so reporting twice is harmless.
+   */
+  async reportGeofenceEvent(geofenceId: string, trigger: GeofenceTrigger, position?: LatLng): Promise<void> {
+    try {
+      this.checkAndRefreshSession();
+      if (!this.session) this.startNewSession();
+      const externalId = await this.getExternalId();
+      await this.post('/geofences/events', {
+        geofenceId,
+        trigger,
+        userId: this.currentUserId || this.anonymousId,
+        external_id: externalId,
+        anonymousId: this.anonymousId,
+        sessionId: this.session?.sessionId,
+        latitude: position?.latitude,
+        longitude: position?.longitude,
+        timestamp: new Date().toISOString(),
+      });
+      this.log('[Tappd SDK] Geofence event reported:', trigger, geofenceId);
+    } catch (error) {
+      // Like track(): a failed report must never break the app.
+      this.log('[Tappd SDK] Geofence report error:', error);
     }
   }
 
@@ -2612,3 +2656,6 @@ export type { MessageRendererProps } from './renderers/MessageRenderer';
 export type { InAppMessage, InAppMessageConfig } from './types/inAppMessage';
 
 export default TappdSDK;
+
+export { distanceMeters, shouldRefreshGeofences } from './geofences';
+export type { GeofenceTrigger, LatLng, TappdGeofence, TappdGeofenceList } from './geofences';
